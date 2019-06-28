@@ -45,7 +45,7 @@ class GrandReactionRoute : GrandStationRoute(), IGrandReactionRoute {
 
     override suspend fun deleteReaction(id: String) {
         withContext(dispatcher) {
-            usePreparedStatement("DELETE FROM $REACTION_TABLE_NAME WHEN id = ?;") { prepared ->
+            usePreparedStatement("DELETE FROM $REACTION_TABLE_NAME WHERE id = ?;") { prepared ->
                 prepared.setString(1, id)
                 prepared.execute()
             }

@@ -80,7 +80,6 @@ class GrandEmbedRoute : GrandStationRoute(), IGrandEmbedRoute {
     override suspend fun save(bean: EmbedBean): String =
         withContext(dispatcher) {
             val id = newID()
-            println("Saving with $id")
 
             usePreparedStatement("INSERT INTO $EMBED_TABLE_NAME (id, title, type, description, url, timestamp, color, footer_text, footer_icon_url, footer_proxy_icon_url, image_url, image_proxy_url, image_height, image_width, thumbnail_url, thumbnail_proxy_url, thumbnail_height, thumbnail_width, video_url, video_proxy_url, video_height, video_width, provider_name, provider_url, author_name, author_url, author_icon_url, author_proxy_icon_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)") { prepared ->
                 prepared.setString(1, id)

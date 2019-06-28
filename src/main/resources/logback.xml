@@ -8,6 +8,7 @@
     </appender>
 
     <logger name="AutoChannelSlowMode" level="TRACE" />
+    <logger name="com.zaxxer.hikari" level="DEBUG" />
 
     <root level="info">
         <appender-ref ref="STDOUT" />

@@ -22,4 +22,7 @@ abstract class AlterEgoModule(val alterEgo: AlterEgo) {
     fun command(name: String): String? = alterEgo.config["command.$name"]?.toString()
 
     abstract fun register()
+
+    suspend fun newID(): String = newIDLong().toString()
+    suspend fun newIDLong(): Long = alterEgo.snowstorm.generate()
 }

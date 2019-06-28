@@ -168,30 +168,46 @@ class GrandMessageRoute : GrandStationRoute(), IGrandMessageRoute {
                 val existingReactions =
                     reactionIDsForMessage(messageID).map { id -> id to station.reactionForID(id) }
 
-                existingEmbeds.forEach { (id, embed) ->
-                    if (bean.embeds.none { newEmbed -> newEmbed == embed }) {
-                        //Embed has been deleted or changed
-                        station.deleteEmbed(id)
+                usePreparedStatement("DELETE FROM $MESSAGE_EMBEDS_TABLE_NAME WHERE embed_id = ?;") { prepared ->
+                    existingEmbeds.forEach { (id, embed) ->
+                        if (bean.embeds.none { newEmbed -> newEmbed == embed }) {
+                            //Embed has been deleted or changed
+                            station.deleteEmbed(id)
+                            prepared.setString(1, id)
+                            prepared.execute()
+                        }
                     }
                 }
-                bean.embeds.forEach { newEmbed ->
-                    if (existingEmbeds.none { (_, embed) -> newEmbed == embed }) {
-                        //We got a new embed
-                        station.save(newEmbed)
+                usePreparedStatement("INSERT INTO $MESSAGE_EMBEDS_TABLE_NAME (embed_id, message_id) VALUES (?, ?);") { prepared ->
+                    bean.embeds.forEach { newEmbed ->
+                        if (existingEmbeds.none { (_, embed) -> newEmbed == embed }) {
+                            //We got a new embed
+                            prepared.setString(1, station.save(newEmbed))
+                            prepared.setString(2, messageID)
+                            prepared.execute()
+                        }
                     }
                 }
 
                 //TODO: Examine the efficiency of reaction events
-                existingReactions.forEach { (id, reaction) ->
-                    if (bean.reactions?.none { newReact -> newReact == reaction } == true) {
-                        //Reaction has been deleted or updated
-                        station.deleteReaction(id)
+                usePreparedStatement("DELETE FROM $MESSAGE_REACTIONS_TABLE_NAME WHERE reaction_id = ?;") { prepared ->
+                    existingReactions.forEach { (id, reaction) ->
+                        if (bean.reactions?.none { newReact -> newReact == reaction } == true) {
+                            //Reaction has been deleted or updated
+                            station.deleteReaction(id)
+                            prepared.setString(1, id)
+                            prepared.execute()
+                        }
                     }
                 }
-                bean.reactions?.forEach { newReact ->
-                    if (existingReactions.none { (_, reaction) -> newReact == reaction }) {
-                        //We got a new reaction
-                        station.save(newReact)
+                usePreparedStatement("INSERT INTO $MESSAGE_REACTIONS_TABLE_NAME (reaction_id, message_id) VALUES (?, ?);") { prepared ->
+                    bean.reactions?.forEach { newReact ->
+                        if (existingReactions.none { (_, reaction) -> newReact == reaction }) {
+                            //We got a new reaction
+                            prepared.setString(1, station.save(newReact))
+                            prepared.setString(2, messageID)
+                            prepared.execute()
+                        }
                     }
                 }
             } else {

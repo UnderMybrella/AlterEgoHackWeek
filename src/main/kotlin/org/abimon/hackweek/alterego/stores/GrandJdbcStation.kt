@@ -2,6 +2,7 @@ package org.abimon.hackweek.alterego.stores
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.reactor.asCoroutineDispatcher
+import org.abimon.hackweek.alterego.AlterEgo
 import org.abimon.hackweek.alterego.SnowflakeGenerator
 import org.abimon.hackweek.alterego.createTableSql
 import org.abimon.hackweek.alterego.stores.routes.*
@@ -10,13 +11,12 @@ import reactor.core.scheduler.Schedulers
 import java.sql.Connection
 import java.sql.PreparedStatement
 import java.sql.Statement
-import javax.sql.DataSource
 
 @ExperimentalUnsignedTypes
 @ExperimentalCoroutinesApi
 class GrandJdbcStation(
     val tablePrefix: String,
-    val db: DataSource,
+    val alterEgo: AlterEgo,
     val snowstorm: SnowflakeGenerator,
     val userRoute: IGrandUserRoute = GrandUserRoute(),
     val messageRoute: IGrandMessageRoute = GrandMessageRoute(),
@@ -44,18 +44,18 @@ class GrandJdbcStation(
     val MESSAGE_EMBEDS_TABLE_NAME = table("message_embeds")
     val MESSAGE_REACTIONS_TABLE_NAME = table("message_reactions")
 
-    public inline fun <R> use(block: (Connection) -> R): R = db.connection.use(block)
+    public inline fun <R> use(block: (Connection) -> R): R = alterEgo.connection().use(block)
     public inline fun <R> useStatement(block: (Statement) -> R): R =
-        db.connection.use { it.createStatement().use(block) }
+        alterEgo.connection().use { it.createStatement().use(block) }
 
     public inline fun <R> useStatement(@Language("SQL") sql: String, block: (Statement) -> R): R =
-        db.connection.use { it.createStatement().use { stmt -> stmt.execute(sql); block(stmt) } }
+        alterEgo.connection().use { it.createStatement().use { stmt -> stmt.execute(sql); block(stmt) } }
 
     public inline fun <R> usePreparedStatement(@Language("SQL") sql: String, block: (PreparedStatement) -> R): R =
-        db.connection.use { it.prepareStatement(sql).use(block) }
+        alterEgo.connection().use { it.prepareStatement(sql).use(block) }
 
     public inline fun execute(@Language("SQL") sql: String) =
-        db.connection.use { it.createStatement().use { stmt -> stmt.execute(sql) } }
+        alterEgo.connection().use { it.createStatement().use { stmt -> stmt.execute(sql) } }
 
     fun table(name: String): String = "${tablePrefix}_$name"
 
@@ -67,7 +67,7 @@ class GrandJdbcStation(
     }
 
     init {
-        db.connection.use { connection ->
+        alterEgo.connection().use { connection ->
             connection.createStatement().use { statement ->
                 execute(
                     createTableSql(

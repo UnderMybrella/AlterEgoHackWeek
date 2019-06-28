@@ -1,8 +1,9 @@
 package org.abimon.hackweek.alterego
 
+import discord4j.core.ServiceMediator
 import discord4j.core.`object`.data.stored.MessageBean
 import discord4j.core.`object`.data.stored.embed.EmbedFieldBean
-import discord4j.core.`object`.entity.Message
+import discord4j.core.`object`.entity.*
 import discord4j.core.util.EntityUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -51,9 +52,13 @@ fun <T: Any> wrapMono(context: CoroutineContext = Dispatchers.Default, block: su
 fun discordSnowflakeForTime(time: Instant): String = ((time.toEpochMilli() - EntityUtil.DISCORD_EPOCH) shl 22).toString()
 
 val MESSAGE_DATA_FIELD = Message::class.java.getDeclaredField("data").apply { isAccessible = true }
+val MESSAGE_SERVICE_MEDIATOR = Message::class.java.getDeclaredField("serviceMediator").apply { isAccessible = true }
 
 val Message.bean: MessageBean
     get() = MESSAGE_DATA_FIELD[this] as MessageBean
+
+val Message.serviceMediator: ServiceMediator
+    get() = MESSAGE_SERVICE_MEDIATOR[this] as ServiceMediator
 
 operator fun AtomicInteger.inc(): AtomicInteger {
     incrementAndGet()
@@ -119,4 +124,15 @@ fun String.parameters(limit: Int): List<String> {
     } catch (ignored: IndexOutOfBoundsException) {}
 
     return results
+}
+
+@ExperimentalUnsignedTypes
+@ExperimentalCoroutinesApi
+fun AlterEgo.prefixFor(channel: Channel): String = if (channel is GuildChannel) prefixFor(channel.guildId.asLong()) else defaultPrefix
+
+val NON_NUMERIC_REGEX = "\\D".toRegex()
+fun Guild.findRoleByIdentifier(identifier: String): Mono<Role> {
+    val identifierNumeric = identifier.replace(NON_NUMERIC_REGEX, "")
+    return roles.filter { role -> role.id.asString() == identifier || role.id.asString() == identifierNumeric || role.name.equals(identifier, true) }
+        .next()
 }

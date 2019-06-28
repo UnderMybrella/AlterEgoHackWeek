@@ -8,6 +8,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.reactor.asMono
 import org.abimon.hackweek.alterego.AlterEgo
 import org.abimon.hackweek.alterego.parameters
+import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 
 @ExperimentalUnsignedTypes
@@ -58,6 +59,7 @@ class MetaModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
             .map(MessageCreateEvent::getMessage)
             .filter(alterEgo::messageSentByUser)
             .filterWhen(alterEgo::messageRequiresManageServerPermission)
+            .flatMap(alterEgo::stripMessagePrefix)
             .flatMap { msg -> alterEgo.stripCommandFromMessage(msg, COMMAND_CHANGE_PREFIX_NAME, commandChangePrefix) }
             .flatMap { msg ->
                 msg.channel.ofType(GuildMessageChannel::class.java).map { channel -> Pair(msg, channel) }
@@ -74,6 +76,7 @@ class MetaModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
             .map(MessageCreateEvent::getMessage)
             .filter(alterEgo::messageSentByUser)
             .filterWhen(alterEgo::messageRequiresManageServerPermission)
+            .flatMap(alterEgo::stripMessagePrefix)
             .flatMap { msg -> alterEgo.stripCommandFromMessage(msg, COMMAND_CHANGE_COMMAND_NAME, commandChangeCommand) }
             .flatMap { msg ->
                 msg.channel.ofType(GuildMessageChannel::class.java).map { channel -> Pair(msg, channel) }
@@ -96,11 +99,19 @@ class MetaModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                             channel.createMessage("Reset command trigger for `$name`")
                         }
                     }
+            }
+            .subscribe()
 
-//                val newPrefix = msg.content.get().trim('"')
-//                alterEgo.setPrefixFor(channel.guildId.asLong(), newPrefix)
-//                    .asMono(defaultContext)
-//                    .flatMap { channel.createMessage("Set prefix to `$newPrefix`\nExample: `${newPrefix}help`") }
+        alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
+            .map(MessageCreateEvent::getMessage)
+            .filter(alterEgo::messageSentByBrella)
+            .flatMap(alterEgo::stripMessagePrefix)
+            .filter { msg -> msg.content.orElse("").startsWith("meta stacktrace") }
+            .flatMap { msg -> msg.channel }
+            .flatMap { channel ->
+                Flux.fromIterable(Thread.getAllStackTraces().entries.map { (thread, stack) -> "${thread.name}: ${stack[0].toString()}" })
+                    .buffer(5)
+                    .flatMap { list -> channel.createMessage(list.joinToString("\n")) }
             }
             .subscribe()
     }

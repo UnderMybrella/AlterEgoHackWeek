@@ -12,11 +12,15 @@ import discord4j.core.`object`.util.Snowflake
 import discord4j.core.event.domain.guild.GuildCreateEvent
 import discord4j.core.event.domain.lifecycle.ReadyEvent
 import discord4j.core.event.domain.lifecycle.ResumeEvent
+import discord4j.rest.request.RouterOptions
+import discord4j.rest.response.ResponseFunction
 import discord4j.store.api.mapping.MappingStoreService
 import discord4j.store.jdk.JdkStoreService
 import kotlinx.coroutines.*
 import org.abimon.hackweek.alterego.functions.AutoChannelSlowMode
 import org.abimon.hackweek.alterego.functions.MetaModule
+import org.abimon.hackweek.alterego.functions.RolesModule
+import org.abimon.hackweek.alterego.functions.UserThoroughfare
 import org.abimon.hackweek.alterego.stores.GrandCentralService
 import org.abimon.hackweek.alterego.stores.GrandJdbcStation
 import org.abimon.hackweek.alterego.stores.MessageTableBean
@@ -29,7 +33,9 @@ import java.time.Duration
 import java.time.temporal.ChronoUnit
 import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.locks.ReentrantLock
 import kotlin.collections.HashMap
+import kotlin.concurrent.withLock
 
 
 @ExperimentalCoroutinesApi
@@ -62,6 +68,7 @@ class AlterEgo(val config: Properties) {
     val scheduler = CoroutineReactorScheduler(context = context)
 
     val hikariDataSource: HikariDataSource
+    val hikariLock = ReentrantLock()
     val mapping: MappingStoreService
     val client: DiscordClient
     val snowstorm: SnowflakeGenerator = SnowflakeGenerator(
@@ -73,18 +80,23 @@ class AlterEgo(val config: Properties) {
     private val guildPrefixes: MutableMap<Long, String> = HashMap()
     private val guildCommandTriggers: MutableMap<Long, MutableMap<String, String>> = HashMap()
 
-    public inline fun <R> useConnection(block: (Connection) -> R): R = hikariDataSource.connection.use(block)
+    public inline fun connection(): Connection {
+        //println(Thread.currentThread().stackTrace[1].toString())
+        return hikariLock.withLock { hikariDataSource.connection }
+    }
+
+    public inline fun <R> useConnection(block: (Connection) -> R): R = connection().use(block)
     public inline fun <R> useStatement(block: (Statement) -> R): R =
-        hikariDataSource.connection.use { it.createStatement().use(block) }
+        connection().use { it.createStatement().use(block) }
 
     public inline fun <R> useStatement(@Language("SQL") sql: String, block: (Statement) -> R): R =
-        hikariDataSource.connection.use { it.createStatement().use { stmt -> stmt.execute(sql); block(stmt) } }
+        connection().use { it.createStatement().use { stmt -> stmt.execute(sql); block(stmt) } }
 
     public inline fun <R> usePreparedStatement(@Language("SQL") sql: String, block: (PreparedStatement) -> R): R =
-        hikariDataSource.connection.use { it.prepareStatement(sql).use(block) }
+        connection().use { it.prepareStatement(sql).use(block) }
 
     public inline fun execute(@Language("SQL") sql: String) =
-        hikariDataSource.connection.use { it.createStatement().use { stmt -> stmt.execute(sql) } }
+        connection().use { it.createStatement().use { stmt -> stmt.execute(sql) } }
 
     val defaultPrefix = config["defaultPrefix"]?.toString() ?: "~|"
 
@@ -186,9 +198,16 @@ class AlterEgo(val config: Properties) {
     }
 
     fun messageSentByUser(msg: Message): Boolean = !msg.author.map(User::isBot).orElse(true)
+    fun messageSentByBrella(msg: Message): Boolean =
+        !msg.author.map { user -> user.id.asLong() == 149031328132628480L }.orElse(false)
+
     fun messageRequiresManageServerPermission(msg: Message): Mono<Boolean> =
         msg.authorAsMember.flatMap(Member::getBasePermissions)
             .map { perms -> perms.contains(Permission.ADMINISTRATOR) || perms.contains(Permission.MANAGE_GUILD) }
+
+    fun messageRequiresManageRolesPermission(msg: Message): Mono<Boolean> =
+        msg.authorAsMember.flatMap(Member::getBasePermissions)
+            .map { perms -> perms.contains(Permission.ADMINISTRATOR) || perms.contains(Permission.MANAGE_ROLES) }
 
     fun stripMessagePrefix(msg: Message): Mono<Message> =
         msg.guild.flatMap { guild ->
@@ -197,19 +216,16 @@ class AlterEgo(val config: Properties) {
                     val prefix = prefixFor(guild.id.asLong())
 
                     if (msg.content.map { str -> str.startsWith(prefix) }.orElse(false)) {
-                        msg.bean.let { bean ->
-                            bean.content = bean.content?.replaceFirst(prefix, "")
-                        }
-
-                        msg
+                        val copy = MessageBean(msg.bean)
+                        copy.content = copy.content?.replaceFirst(prefix, "")
+                        Message(msg.serviceMediator, copy)
                     } else if (msg.content.map { str ->
                             str.startsWith("<@${self.id.asString()}> ") || str.startsWith("<@!${self.id.asString()}> ")
                         }.orElse(false)) {
-                        msg.bean.let { bean ->
-                            bean.content = bean.content?.substringAfter("> ")
-                        }
+                        val copy = MessageBean(msg.bean)
+                        copy.content = copy.content?.substringAfter("> ")
 
-                        msg
+                        Message(msg.serviceMediator, copy)
                     } else {
                         null
                     }
@@ -223,17 +239,13 @@ class AlterEgo(val config: Properties) {
                 val command = commandFor(guild.id.asLong(), commandName) ?: default
 
                 if (msg.content.map { str -> str.startsWith(command) }.orElse(false)) {
-                    msg.bean.let { bean ->
-                        bean.content = bean.content?.replaceFirst(command, "")
-                    }
-
-                    msg
+                    val copy = MessageBean(msg.bean)
+                    copy.content = copy.content?.replaceFirst(command, "")
+                    Message(msg.serviceMediator, copy)
                 } else if (msg.content.map { str -> str.startsWith(default) }.orElse(false)) {
-                    msg.bean.let { bean ->
-                        bean.content = bean.content?.replaceFirst(default, "")
-                    }
-
-                    msg
+                    val copy = MessageBean(msg.bean)
+                    copy.content = copy.content?.replaceFirst(default, "")
+                    Message(msg.serviceMediator, copy)
                 } else {
                     null
                 }
@@ -246,6 +258,9 @@ class AlterEgo(val config: Properties) {
         hikariConfig.addDataSourceProperty("cachePrepStatements", "true")
         hikariConfig.addDataSourceProperty("prepStmtCacheSize", "250")
         hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048")
+        hikariConfig.leakDetectionThreshold = 60 * 1000
+        hikariConfig.maximumPoolSize = 40
+        hikariConfig.connectionTimeout = 10_000
 
         hikariDataSource = HikariDataSource(hikariConfig)
         execute("CREATE TABLE IF NOT EXISTS prefixes (guild_id VARCHAR(32) NOT NULL PRIMARY KEY, prefix VARCHAR(64) DEFAULT '$defaultPrefix' NOT NULL);")
@@ -264,17 +279,16 @@ class AlterEgo(val config: Properties) {
                     while (rs.next())
                         guildCommandTriggers.compute(rs.getString("guild_id").toULong().toLong()) { _, map ->
                             (map ?: HashMap()).apply {
-                                put(
-                                    rs.getString("command_name"),
-                                    rs.getString("command_trigger")
-                                )
+                                rs.getString("command_trigger")?.let { trigger ->
+                                    put(rs.getString("command_name"), trigger)
+                                }
                             }
                         }
                 }
             }
         }
 
-        station = GrandJdbcStation(config["stationName"]?.toString() ?: "gcs", hikariDataSource, snowstorm)
+        station = GrandJdbcStation(config["stationName"]?.toString() ?: "gcs", this, snowstorm)
 
         mapping = MappingStoreService.create()
             .setMappings(GrandCentralService(station), MessageBean::class.java, UserBean::class.java)
@@ -282,6 +296,7 @@ class AlterEgo(val config: Properties) {
 
         client = DiscordClientBuilder(config["token"] as String)
             .setStoreService(mapping)
+            .setRouterOptions(RouterOptions.builder().onClientResponse(ResponseFunction.emptyIfNotFound()).build())
             .build()
 
         client.eventDispatcher.on(ReadyEvent::class.java)
@@ -302,6 +317,10 @@ class AlterEgo(val config: Properties) {
 
         AutoChannelSlowMode(this).register()
         MetaModule(this).register()
+        UserThoroughfare(this).register()
+        RolesModule(this).register()
+
+        println()
 
         client.login().block()
     }

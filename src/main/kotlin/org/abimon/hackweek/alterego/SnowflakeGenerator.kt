@@ -23,6 +23,10 @@ class SnowflakeGenerator(workerID: Int, processID: Int, val epoch: Long = 156139
             } else if (now > lastTime) {
                 thisMs = 0
                 lastTime = clock.millis()
+            } else if (thisMs > 4095) {
+                delay(1)
+                thisMs = 0
+                lastTime = clock.millis()
             }
 
             return ((now - epoch) shl 22) or workerID or processID or (thisMs++ shl 1)
