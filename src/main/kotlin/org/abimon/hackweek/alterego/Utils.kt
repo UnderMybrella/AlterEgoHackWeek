@@ -15,7 +15,9 @@ import java.sql.ResultSet
 import java.sql.Types
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.regex.Pattern
 import kotlin.coroutines.CoroutineContext
+
 
 @ExperimentalUnsignedTypes
 fun Long.toUString(): String = toULong().toString()
@@ -76,4 +78,45 @@ fun createTableSql(tableName: String, vararg components: String): String = build
     append(" (")
     append(components.joinToString(", "))
     append(");")
+}
+
+fun <T> MutableList<T>.popOrNull(): T? = if (isEmpty()) null else removeAt(0)
+
+/**
+ * Borrowed from https://stackoverflow.com/a/3366634
+ */
+val regex: Pattern = Pattern.compile("\"((?:\\\\\"|[^\"])*)\"|(\\S+)")
+fun String.parameters(): List<String> {
+    val m = regex.matcher(this)
+    val results: MutableList<String> = ArrayList()
+    while (m.find()) {
+        if (m.group(1) != null) {
+            results.add(m.group(1).replace("\\\"", "\""))
+        } else {
+            results.add(m.group(2))
+        }
+    }
+
+    return results
+}
+
+fun String.parameters(limit: Int): List<String> {
+    val m = regex.matcher(this)
+    val results: MutableList<String> = ArrayList()
+    try {
+        while (m.find()) {
+            if (m.group(1) != null) {
+                results.add(m.group(1).replace("\\\"", "\""))
+            } else {
+                results.add(m.group(2))
+            }
+
+            if (results.size + 1 == limit) {
+                results.add(this.substring(m.toMatchResult().end() + 1).trim('"'))
+                break
+            }
+        }
+    } catch (ignored: IndexOutOfBoundsException) {}
+
+    return results
 }

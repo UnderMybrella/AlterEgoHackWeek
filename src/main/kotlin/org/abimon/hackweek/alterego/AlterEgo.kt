@@ -6,8 +6,8 @@ import discord4j.core.DiscordClient
 import discord4j.core.DiscordClientBuilder
 import discord4j.core.`object`.data.stored.MessageBean
 import discord4j.core.`object`.data.stored.UserBean
-import discord4j.core.`object`.entity.Guild
-import discord4j.core.`object`.entity.GuildMessageChannel
+import discord4j.core.`object`.entity.*
+import discord4j.core.`object`.util.Permission
 import discord4j.core.`object`.util.Snowflake
 import discord4j.core.event.domain.guild.GuildCreateEvent
 import discord4j.core.event.domain.lifecycle.ReadyEvent
@@ -71,6 +71,7 @@ class AlterEgo(val config: Properties) {
     val station: GrandJdbcStation
 
     private val guildPrefixes: MutableMap<Long, String> = HashMap()
+    private val guildCommandTriggers: MutableMap<Long, MutableMap<String, String>> = HashMap()
 
     public inline fun <R> useConnection(block: (Connection) -> R): R = hikariDataSource.connection.use(block)
     public inline fun <R> useStatement(block: (Statement) -> R): R =
@@ -118,24 +119,126 @@ class AlterEgo(val config: Properties) {
                         prepared.execute()
                     }
                 } catch (sql: SQLException) {
-                    cancel(CancellationException("An error occurred when inserting a prefix into the prefixes table", sql))
+                    cancel(
+                        CancellationException(
+                            "An error occurred when inserting a prefix into the prefixes table",
+                            sql
+                        )
+                    )
                 }
             }
         }
     }
 
-//    fun stripMessagePrefix(msg: Message): Mono<Message> =
-//        msg.guild.flatMap { guild ->
-//            wrapMono(context) {
-//                val prefix =
-//
-//                if (msg.content.map { str -> str.startsWith(prefix) }.orElse(false)) {
-//                    msg.bean.let { bean ->
-//                        bean.content = bean.content?.replaceFirst(prefix, "")
-//                    }
-//                }
-//            }
-//        }
+    fun commandFor(guildID: String, commandName: String) = commandFor(guildID.toULong().toLong(), commandName)
+    fun commandFor(guildID: Long, commandName: String): String? = guildCommandTriggers[guildID]?.get(commandName)
+
+    fun setCommandFor(guildID: String, commandName: String, commandTrigger: String) =
+        setCommandFor(guildID.toULong().toLong(), commandName, commandTrigger)
+
+    fun setCommandFor(guildID: Long, commandName: String, commandTrigger: String?): Job {
+        guildCommandTriggers.compute(guildID) { _, map ->
+            (map ?: HashMap()).apply {
+                if (commandTrigger == null)
+                    remove(commandName)
+                else
+                    put(commandName, commandTrigger)
+            }
+        }
+
+        return GlobalScope.launch(context) {
+            val id =
+                usePreparedStatement("SELECT id FROM command_triggers WHERE guild_id = ? AND command_name = ?;") { prepared ->
+                    prepared.setString(1, guildID.toUString())
+                    prepared.setString(2, commandName)
+                    prepared.execute()
+
+                    prepared.resultSet.use { rs -> rs.takeIf(ResultSet::next)?.getString("id") }
+                }
+
+            if (id != null) {
+                usePreparedStatement("UPDATE command_triggers SET command_trigger = ? WHERE id = ?;") { prepared ->
+                    prepared.setString(1, commandTrigger)
+                    prepared.setString(2, id)
+
+                    prepared.execute()
+                }
+            } else {
+                try {
+                    usePreparedStatement("INSERT INTO command_triggers (id, guild_id, command_name, command_trigger) VALUES (?, ?, ?, ?);") { prepared ->
+                        prepared.setString(1, snowstorm.generate().toString())
+                        prepared.setString(2, guildID.toUString())
+                        prepared.setString(3, commandName)
+                        prepared.setString(4, commandTrigger)
+
+                        prepared.execute()
+                    }
+                } catch (sql: SQLException) {
+                    cancel(
+                        CancellationException(
+                            "An error occurred when inserting a command into the commands table",
+                            sql
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun messageSentByUser(msg: Message): Boolean = !msg.author.map(User::isBot).orElse(true)
+    fun messageRequiresManageServerPermission(msg: Message): Mono<Boolean> =
+        msg.authorAsMember.flatMap(Member::getBasePermissions)
+            .map { perms -> perms.contains(Permission.ADMINISTRATOR) || perms.contains(Permission.MANAGE_GUILD) }
+
+    fun stripMessagePrefix(msg: Message): Mono<Message> =
+        msg.guild.flatMap { guild ->
+            msg.client.self.flatMap { self ->
+                wrapMono(context) {
+                    val prefix = prefixFor(guild.id.asLong())
+
+                    if (msg.content.map { str -> str.startsWith(prefix) }.orElse(false)) {
+                        msg.bean.let { bean ->
+                            bean.content = bean.content?.replaceFirst(prefix, "")
+                        }
+
+                        msg
+                    } else if (msg.content.map { str ->
+                            str.startsWith("<@${self.id.asString()}> ") || str.startsWith("<@!${self.id.asString()}> ")
+                        }.orElse(false)) {
+                        msg.bean.let { bean ->
+                            bean.content = bean.content?.substringAfter("> ")
+                        }
+
+                        msg
+                    } else {
+                        null
+                    }
+                }
+            }
+        }
+
+    fun stripCommandFromMessage(msg: Message, commandName: String, default: String): Mono<Message> =
+        msg.guild.flatMap { guild ->
+            wrapMono(context) {
+                val command = commandFor(guild.id.asLong(), commandName) ?: default
+
+                if (msg.content.map { str -> str.startsWith(command) }.orElse(false)) {
+                    msg.bean.let { bean ->
+                        bean.content = bean.content?.replaceFirst(command, "")
+                    }
+
+                    msg
+                } else if (msg.content.map { str -> str.startsWith(default) }.orElse(false)) {
+                    msg.bean.let { bean ->
+                        bean.content = bean.content?.replaceFirst(default, "")
+                    }
+
+                    msg
+                } else {
+                    null
+                }
+            }
+        }
 
     init {
         val hikariConfig = HikariConfig()
@@ -145,7 +248,31 @@ class AlterEgo(val config: Properties) {
         hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048")
 
         hikariDataSource = HikariDataSource(hikariConfig)
-        execute("CREATE TABLE IF NOT EXISTS prefixes (guild_id VARCHAR(32) NOT NULL PRIMARY KEY, prefix VARCHAR(64) DEFAULT $defaultPrefix NOT NULL);")
+        execute("CREATE TABLE IF NOT EXISTS prefixes (guild_id VARCHAR(32) NOT NULL PRIMARY KEY, prefix VARCHAR(64) DEFAULT '$defaultPrefix' NOT NULL);")
+        execute("CREATE TABLE IF NOT EXISTS command_triggers (id VARCHAR(32) NOT NULL PRIMARY KEY, guild_id VARCHAR(32) NOT NULL, command_name VARCHAR(128) NOT NULL, command_trigger VARCHAR(256));")
+
+        GlobalScope.launch(context) {
+            useStatement("SELECT guild_id, prefix FROM prefixes;") { statement ->
+                statement.resultSet.use { rs ->
+                    while (rs.next()) guildPrefixes[rs.getString("guild_id").toULong().toLong()] =
+                        rs.getString("prefix")
+                }
+            }
+
+            useStatement("SELECT guild_id, command_name, command_trigger FROM command_triggers;") { statement ->
+                statement.resultSet.use { rs ->
+                    while (rs.next())
+                        guildCommandTriggers.compute(rs.getString("guild_id").toULong().toLong()) { _, map ->
+                            (map ?: HashMap()).apply {
+                                put(
+                                    rs.getString("command_name"),
+                                    rs.getString("command_trigger")
+                                )
+                            }
+                        }
+                }
+            }
+        }
 
         station = GrandJdbcStation(config["stationName"]?.toString() ?: "gcs", hikariDataSource, snowstorm)
 
