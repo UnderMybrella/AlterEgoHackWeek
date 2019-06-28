@@ -14,6 +14,7 @@ import java.sql.PreparedStatement
 import java.sql.ResultSet
 import java.sql.Types
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.CoroutineContext
 
 @ExperimentalUnsignedTypes
@@ -51,3 +52,20 @@ val MESSAGE_DATA_FIELD = Message::class.java.getDeclaredField("data").apply { is
 
 val Message.bean: MessageBean
     get() = MESSAGE_DATA_FIELD[this] as MessageBean
+
+operator fun AtomicInteger.inc(): AtomicInteger {
+    incrementAndGet()
+    return this
+}
+
+operator fun AtomicInteger.dec(): AtomicInteger {
+    decrementAndGet()
+    return this
+}
+
+fun AtomicInteger.decrementButNotBelow(num: Int): Int {
+    val result = decrementAndGet()
+    if (result < num)
+        return incrementAndGet()
+    return result
+}

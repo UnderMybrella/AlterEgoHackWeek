@@ -7,6 +7,8 @@
         </encoder>
     </appender>
 
+    <logger name="AutoChannelSlowMode" level="TRACE" />
+
     <root level="info">
         <appender-ref ref="STDOUT" />
     </root>

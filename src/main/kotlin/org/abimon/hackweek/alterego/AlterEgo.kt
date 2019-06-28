@@ -15,6 +15,7 @@ import discord4j.core.event.domain.lifecycle.ResumeEvent
 import discord4j.store.api.mapping.MappingStoreService
 import discord4j.store.jdk.JdkStoreService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import org.abimon.hackweek.alterego.functions.AutoChannelSlowMode
 import org.abimon.hackweek.alterego.stores.GrandCentralService
 import org.abimon.hackweek.alterego.stores.GrandJdbcStation
 import org.abimon.hackweek.alterego.stores.MessageTableBean
@@ -88,6 +89,8 @@ class AlterEgo(val config: Properties) {
         client.eventDispatcher.on(GuildCreateEvent::class.java)
             .flatMap { event -> resumeGuild(event.guild) }
             .subscribe()
+
+        AutoChannelSlowMode().register(client)
 
         client.login().block()
     }
