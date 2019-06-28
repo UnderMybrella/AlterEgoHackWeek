@@ -1,0 +1,5 @@
+<root>
+    <item name='discord4j.core.object.data.stored.MessageBean java.lang.String getContent()'>
+        <annotation name='org.jetbrains.annotations.Nullable'/>
+    </item>
+</root>
