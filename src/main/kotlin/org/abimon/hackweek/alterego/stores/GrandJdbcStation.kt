@@ -3,6 +3,7 @@ package org.abimon.hackweek.alterego.stores
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.reactor.asCoroutineDispatcher
 import org.abimon.hackweek.alterego.SnowflakeGenerator
+import org.abimon.hackweek.alterego.createTableSql
 import org.abimon.hackweek.alterego.stores.routes.*
 import org.intellij.lang.annotations.Language
 import reactor.core.scheduler.Schedulers
@@ -48,7 +49,7 @@ class GrandJdbcStation(
         db.connection.use { it.createStatement().use(block) }
 
     public inline fun <R> useStatement(@Language("SQL") sql: String, block: (Statement) -> R): R =
-        db.connection.use { it.createStatement().use { stmt -> execute(sql); block(stmt) } }
+        db.connection.use { it.createStatement().use { stmt -> stmt.execute(sql); block(stmt) } }
 
     public inline fun <R> usePreparedStatement(@Language("SQL") sql: String, block: (PreparedStatement) -> R): R =
         db.connection.use { it.prepareStatement(sql).use(block) }
@@ -57,14 +58,6 @@ class GrandJdbcStation(
         db.connection.use { it.createStatement().use { stmt -> stmt.execute(sql) } }
 
     fun table(name: String): String = "${tablePrefix}_$name"
-
-    fun createTableSql(tableName: String, vararg components: String): String = buildString {
-        append("CREATE TABLE IF NOT EXISTS ")
-        append(tableName)
-        append(" (")
-        append(components.joinToString(", "))
-        append(");")
-    }
 
     fun stationRoute(route: Any) {
         if (route is GrandStationRoute) {

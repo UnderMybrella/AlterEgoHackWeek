@@ -55,8 +55,6 @@ open class GrandStationRoute : IGrandStationRoute {
 
     public inline fun execute(@Language("SQL")sql: String) = station.execute(sql)
 
-    fun createTableSql(tableName: String, vararg components: String): String = station.createTableSql(tableName, *components)
-
     suspend fun newID(): String = newIDLong().toString()
     suspend fun newIDLong(): Long = station.snowstorm.generate()
 

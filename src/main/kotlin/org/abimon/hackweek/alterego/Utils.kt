@@ -69,3 +69,11 @@ fun AtomicInteger.decrementButNotBelow(num: Int): Int {
         return incrementAndGet()
     return result
 }
+
+fun createTableSql(tableName: String, vararg components: String): String = buildString {
+    append("CREATE TABLE IF NOT EXISTS ")
+    append(tableName)
+    append(" (")
+    append(components.joinToString(", "))
+    append(");")
+}

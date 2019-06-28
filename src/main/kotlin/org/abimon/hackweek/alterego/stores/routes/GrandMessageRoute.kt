@@ -6,11 +6,13 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.reactor.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
+import org.abimon.hackweek.alterego.createTableSql
 import org.abimon.hackweek.alterego.mapToArraySuspend
 import org.abimon.hackweek.alterego.stores.MessageTableBean
 import org.abimon.hackweek.alterego.toUString
 import reactor.core.scheduler.Schedulers
 import java.sql.ResultSet
+import java.sql.SQLException
 
 @ExperimentalCoroutinesApi
 @ExperimentalUnsignedTypes
@@ -193,19 +195,24 @@ class GrandMessageRoute : GrandStationRoute(), IGrandMessageRoute {
                     }
                 }
             } else {
-                usePreparedStatement("INSERT INTO $MESSAGE_TABLE_NAME (id, channel_id, author_id, content, timestamp, edited_timestamp, tts, mentions_everyone, pinned, webhook_id, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);") { prepared ->
-                    prepared.setString(1, messageID)
-                    prepared.setString(2, bean.channelId.toUString())
-                    prepared.setString(3, bean.author?.id?.toUString())
-                    prepared.setString(4, bean.content?.takeIf(String::isNotEmpty))
-                    prepared.setString(5, bean.timestamp)
-                    prepared.setString(6, bean.editedTimestamp)
-                    prepared.setBoolean(7, bean.isTts)
-                    prepared.setBoolean(8, bean.isMentionEveryone)
-                    prepared.setBoolean(9, bean.isPinned)
-                    prepared.setString(10, bean.webhookId?.toUString())
-                    prepared.setInt(11, bean.type)
-                    prepared.execute()
+                try {
+                    usePreparedStatement("INSERT INTO $MESSAGE_TABLE_NAME (id, channel_id, author_id, content, timestamp, edited_timestamp, tts, mentions_everyone, pinned, webhook_id, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);") { prepared ->
+                        prepared.setString(1, messageID)
+                        prepared.setString(2, bean.channelId.toUString())
+                        prepared.setString(3, bean.author?.id?.toUString())
+                        prepared.setString(4, bean.content?.takeIf(String::isNotEmpty))
+                        prepared.setString(5, bean.timestamp)
+                        prepared.setString(6, bean.editedTimestamp)
+                        prepared.setBoolean(7, bean.isTts)
+                        prepared.setBoolean(8, bean.isMentionEveryone)
+                        prepared.setBoolean(9, bean.isPinned)
+                        prepared.setString(10, bean.webhookId?.toUString())
+                        prepared.setInt(11, bean.type)
+                        prepared.execute()
+                    }
+                } catch (sql: SQLException) {
+                    println("ID: $messageID")
+                    throw sql
                 }
 
                 if (bean.attachments.isNotEmpty()) {

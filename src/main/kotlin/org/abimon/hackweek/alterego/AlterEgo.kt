@@ -14,17 +14,22 @@ import discord4j.core.event.domain.lifecycle.ReadyEvent
 import discord4j.core.event.domain.lifecycle.ResumeEvent
 import discord4j.store.api.mapping.MappingStoreService
 import discord4j.store.jdk.JdkStoreService
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.*
 import org.abimon.hackweek.alterego.functions.AutoChannelSlowMode
+import org.abimon.hackweek.alterego.functions.MetaModule
 import org.abimon.hackweek.alterego.stores.GrandCentralService
 import org.abimon.hackweek.alterego.stores.GrandJdbcStation
 import org.abimon.hackweek.alterego.stores.MessageTableBean
+import org.intellij.lang.annotations.Language
 import reactor.core.publisher.Mono
 import reactor.core.publisher.switchIfEmpty
 import java.io.File
+import java.sql.*
 import java.time.Duration
 import java.time.temporal.ChronoUnit
 import java.util.*
+import java.util.concurrent.Executors
+import kotlin.collections.HashMap
 
 
 @ExperimentalCoroutinesApi
@@ -45,7 +50,16 @@ class AlterEgo(val config: Properties) {
 
             AlterEgo(config)
         }
+
+        fun alterThread(runnable: Runnable): Thread {
+            val thread = Thread(runnable, "alter-scheduler")
+            thread.isDaemon = true
+            return thread
+        }
     }
+
+    val context = Executors.newCachedThreadPool(Companion::alterThread).asCoroutineDispatcher()
+    val scheduler = CoroutineReactorScheduler(context = context)
 
     val hikariDataSource: HikariDataSource
     val mapping: MappingStoreService
@@ -56,6 +70,73 @@ class AlterEgo(val config: Properties) {
     )
     val station: GrandJdbcStation
 
+    private val guildPrefixes: MutableMap<Long, String> = HashMap()
+
+    public inline fun <R> useConnection(block: (Connection) -> R): R = hikariDataSource.connection.use(block)
+    public inline fun <R> useStatement(block: (Statement) -> R): R =
+        hikariDataSource.connection.use { it.createStatement().use(block) }
+
+    public inline fun <R> useStatement(@Language("SQL") sql: String, block: (Statement) -> R): R =
+        hikariDataSource.connection.use { it.createStatement().use { stmt -> stmt.execute(sql); block(stmt) } }
+
+    public inline fun <R> usePreparedStatement(@Language("SQL") sql: String, block: (PreparedStatement) -> R): R =
+        hikariDataSource.connection.use { it.prepareStatement(sql).use(block) }
+
+    public inline fun execute(@Language("SQL") sql: String) =
+        hikariDataSource.connection.use { it.createStatement().use { stmt -> stmt.execute(sql) } }
+
+    val defaultPrefix = config["defaultPrefix"]?.toString() ?: "~|"
+
+    fun prefixFor(guildID: String) = prefixFor(guildID.toULong().toLong())
+    fun prefixFor(guildID: Long): String = guildPrefixes[guildID] ?: defaultPrefix
+
+    fun setPrefixFor(guildID: String, prefix: String) = setPrefixFor(guildID.toULong().toLong(), prefix)
+    fun setPrefixFor(guildID: Long, prefix: String): Job {
+        guildPrefixes[guildID] = prefix
+
+        return GlobalScope.launch(context) {
+            val exists = usePreparedStatement("SELECT prefix FROM prefixes WHERE guild_id = ?;") { prepared ->
+                prepared.setString(1, guildID.toUString())
+                prepared.execute()
+
+                prepared.resultSet.use(ResultSet::next)
+            }
+
+            if (exists) {
+                usePreparedStatement("UPDATE prefixes SET prefix = ? WHERE guild_id = ?;") { prepared ->
+                    prepared.setString(1, prefix)
+                    prepared.setString(2, guildID.toUString())
+
+                    prepared.execute()
+                }
+            } else {
+                try {
+                    usePreparedStatement("INSERT INTO prefixes (guild_id, prefix) VALUES (?, ?);") { prepared ->
+                        prepared.setString(1, guildID.toUString())
+                        prepared.setString(2, prefix)
+
+                        prepared.execute()
+                    }
+                } catch (sql: SQLException) {
+                    cancel(CancellationException("An error occurred when inserting a prefix into the prefixes table", sql))
+                }
+            }
+        }
+    }
+
+//    fun stripMessagePrefix(msg: Message): Mono<Message> =
+//        msg.guild.flatMap { guild ->
+//            wrapMono(context) {
+//                val prefix =
+//
+//                if (msg.content.map { str -> str.startsWith(prefix) }.orElse(false)) {
+//                    msg.bean.let { bean ->
+//                        bean.content = bean.content?.replaceFirst(prefix, "")
+//                    }
+//                }
+//            }
+//        }
+
     init {
         val hikariConfig = HikariConfig()
         hikariConfig.jdbcUrl = config["jdbcUrl"] as String
@@ -64,6 +145,8 @@ class AlterEgo(val config: Properties) {
         hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048")
 
         hikariDataSource = HikariDataSource(hikariConfig)
+        execute("CREATE TABLE IF NOT EXISTS prefixes (guild_id VARCHAR(32) NOT NULL PRIMARY KEY, prefix VARCHAR(64) DEFAULT $defaultPrefix NOT NULL);")
+
         station = GrandJdbcStation(config["stationName"]?.toString() ?: "gcs", hikariDataSource, snowstorm)
 
         mapping = MappingStoreService.create()
@@ -90,7 +173,8 @@ class AlterEgo(val config: Properties) {
             .flatMap { event -> resumeGuild(event.guild) }
             .subscribe()
 
-        AutoChannelSlowMode().register(client)
+        AutoChannelSlowMode(this).register()
+        MetaModule(this).register()
 
         client.login().block()
     }
