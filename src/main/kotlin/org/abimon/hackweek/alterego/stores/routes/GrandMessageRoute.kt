@@ -12,7 +12,6 @@ import org.abimon.hackweek.alterego.stores.MessageTableBean
 import org.abimon.hackweek.alterego.toUString
 import reactor.core.scheduler.Schedulers
 import java.sql.ResultSet
-import java.sql.SQLException
 
 @ExperimentalCoroutinesApi
 @ExperimentalUnsignedTypes
@@ -226,7 +225,7 @@ class GrandMessageRoute : GrandStationRoute(), IGrandMessageRoute {
                         prepared.setInt(11, bean.type)
                         prepared.execute()
                     }
-                } catch (sql: SQLException) {
+                } catch (sql: Throwable) {
                     println("ID: $messageID")
                     throw sql
                 }

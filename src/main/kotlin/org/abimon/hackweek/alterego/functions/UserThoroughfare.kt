@@ -219,6 +219,7 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                                 }.flatMap { msg ->
                                     if (oldRoles.isNotEmpty()) {
                                         waitingForRoles[msg.id.asLong()] = AddRolesRequest(
+                                            key = "old_roles",
                                             targetGuild = event.guildId,
                                             targetUser = member.id,
                                             roles = oldRoles.map(Snowflake::of).toTypedArray()

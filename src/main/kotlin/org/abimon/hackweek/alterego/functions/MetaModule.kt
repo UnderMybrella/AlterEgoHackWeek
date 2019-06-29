@@ -3,12 +3,12 @@ package org.abimon.hackweek.alterego.functions
 import discord4j.core.`object`.entity.GuildChannel
 import discord4j.core.`object`.entity.GuildMessageChannel
 import discord4j.core.`object`.entity.Message
+import discord4j.core.`object`.util.Image
 import discord4j.core.event.domain.message.MessageCreateEvent
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.reactor.asMono
 import org.abimon.hackweek.alterego.AlterEgo
 import org.abimon.hackweek.alterego.parameters
-import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 
 @ExperimentalUnsignedTypes
@@ -18,15 +18,18 @@ class MetaModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
         val COMMAND_SELF_NAME = "meta.self"
         val COMMAND_CHANGE_PREFIX_NAME = "meta.change.prefix"
         val COMMAND_CHANGE_COMMAND_NAME = "meta.change.command"
+        val COMMAND_ROLES_NAME = "meta.roles"
 
         val COMMAND_SELF_DEFAULT = "meta self"
         val COMMAND_CHANGE_PREFIX_DEFAULT = "meta change prefix"
         val COMMAND_CHANGE_COMMAND_DEFAULT = "meta change command"
+        val COMMAND_ROLES_DEFAULT = "meta roles"
     }
 
     val commandSelf = command(COMMAND_SELF_NAME) ?: COMMAND_SELF_DEFAULT
     val commandChangePrefix = command(COMMAND_CHANGE_PREFIX_NAME) ?: COMMAND_CHANGE_PREFIX_DEFAULT
     val commandChangeCommand = command(COMMAND_CHANGE_COMMAND_NAME) ?: COMMAND_CHANGE_COMMAND_DEFAULT
+    val commandRoles = command(COMMAND_ROLES_NAME) ?: COMMAND_ROLES_DEFAULT
 
     override fun register() {
         alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
@@ -104,14 +107,23 @@ class MetaModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
 
         alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
             .map(MessageCreateEvent::getMessage)
-            .filter(alterEgo::messageSentByBrella)
+            .filter(alterEgo::messageSentByUser)
             .flatMap(alterEgo::stripMessagePrefix)
-            .filter { msg -> msg.content.orElse("").startsWith("meta stacktrace") }
-            .flatMap { msg -> msg.channel }
-            .flatMap { channel ->
-                Flux.fromIterable(Thread.getAllStackTraces().entries.map { (thread, stack) -> "${thread.name}: ${stack[0].toString()}" })
-                    .buffer(5)
-                    .flatMap { list -> channel.createMessage(list.joinToString("\n")) }
+            .flatMap { msg -> alterEgo.stripCommandFromMessage(msg, COMMAND_ROLES_NAME, commandRoles) }
+            .flatMap { msg ->
+                msg.channel.ofType(GuildMessageChannel::class.java)
+                    .flatMap { channel ->
+                        channel.guild.flatMap { guild ->
+                            guild.roles.collectList().flatMap { roles ->
+                                channel.createEmbed { spec ->
+                                    spec.setTitle("Roles for ${guild.name}")
+                                    guild.getIconUrl(Image.Format.WEB_P)
+                                        .ifPresent { thumbnail -> spec.setThumbnail(thumbnail) }
+                                    spec.setDescription(roles.reversed().take(12).joinToString ("\n") { role -> "${role.mention} (`${role.id.asString()}`)" })
+                                }
+                            }
+                        }
+                    }
             }
             .subscribe()
     }

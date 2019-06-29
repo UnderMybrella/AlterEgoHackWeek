@@ -1,15 +1,21 @@
 package org.abimon.hackweek.alterego.functions
 
 import discord4j.core.`object`.entity.GuildEmoji
+import discord4j.core.`object`.entity.Member
 import discord4j.core.`object`.entity.Message
+import discord4j.core.`object`.reaction.ReactionEmoji
 import discord4j.core.`object`.util.Image
+import discord4j.core.`object`.util.Permission
+import discord4j.core.`object`.util.Snowflake
+import discord4j.core.event.domain.guild.MemberUpdateEvent
 import discord4j.core.event.domain.message.MessageCreateEvent
+import discord4j.core.event.domain.message.ReactionAddEvent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import org.abimon.hackweek.alterego.*
-import org.abimon.hackweek.alterego.requests.ClientRequest
+import org.abimon.hackweek.alterego.requests.AddRolesRequest
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.publisher.switchIfEmpty
@@ -70,12 +76,15 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
 
     val ROLE_RECEIVABLE_TABLE = "roles_receivable"
     val ADDITIONAL_ROLES_TABLE = "roles_additional"
+    val EXCLUSIVE_ROLES_TABLE = "roles_exclusionary"
 
     val matchContext = Executors.newCachedThreadPool(Companion::matchThread).asCoroutineDispatcher()
     val matchScheduler = CoroutineReactorScheduler(context = matchContext)
 
     val rolePackages: MutableMap<Long, MutableList<RolePackage>> = HashMap()
-    val awaitingRoles: MutableMap<Long, ClientRequest<Void>> = ConcurrentHashMap()
+    val exclusiveRoles: MutableMap<Long, MutableList<Long>> = HashMap()
+    val awaitingPermissionForRole: MutableMap<Long, MutableList<AddRolesRequest>> = ConcurrentHashMap()
+    val awaitingConfirmationForRole: MutableMap<Long, MutableList<AddRolesRequest>> = ConcurrentHashMap()
 
     override fun register() {
         alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
@@ -316,6 +325,142 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
             }
             .subscribe()
 
+        alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
+            .publishOn(matchScheduler)
+            .filter { event -> alterEgo.messageSentByUser(event.message) }
+            .filter { event -> event.guildId.isPresent }
+            .filter { event -> event.message.author.isPresent }
+            .flatMap { event ->
+                val guildID = event.guildId.get()
+                val content = event.message.content.orElse("")
+                val matched = rolePackages[guildID.asLong()]?.filter { bundle ->
+                    bundle.regex?.matches(content) == true
+                } ?: return@flatMap Mono.empty<Void>()
+
+                event.guild.flatMap { guild ->
+                    guild.emojis.collectList()
+                        .flatMap { emojis ->
+                            Flux.fromIterable(matched)
+                                .flatMap { bundle ->
+                                    guild.getRoleById(Snowflake.of(bundle.roleID))
+                                        .flatMap local@{ role ->
+                                            val roleEmojiName = "AE_Assign_${role.name.replace(
+                                                "\\s+".toRegex(),
+                                                "_"
+                                            ).let { str ->
+                                                if (str.length > 16) str.replaceRange(
+                                                    16,
+                                                    str.length,
+                                                    "..."
+                                                ) else str
+                                            }}"
+
+                                            val emoji =
+                                                emojis.firstOrNull { emoji -> emoji.name.equals(roleEmojiName, true) }
+                                                    ?: return@local Mono.empty<Void>()
+                                            if (bundle.assignable) {
+                                                awaitingConfirmationForRole.computeIfAbsent(event.message.id.asLong()) { ArrayList() }
+                                                    .add(
+                                                        AddRolesRequest(
+                                                            key = emoji.asFormat(),
+                                                            targetUser = event.message.author.get().id,
+                                                            targetGuild = guild.id,
+                                                            roles = bundle.additionalRoles.map { (roleID) ->
+                                                                Snowflake.of(
+                                                                    roleID
+                                                                )
+                                                            }.plus(
+                                                                role.id
+                                                            ).toTypedArray()
+                                                        )
+                                                    )
+
+                                                event.message.addReaction(ReactionEmoji.custom(emoji))
+                                            } else {
+                                                awaitingPermissionForRole.computeIfAbsent(event.message.id.asLong()) { ArrayList() }
+                                                    .add(
+                                                        AddRolesRequest(
+                                                            key = emoji.asFormat(),
+                                                            targetUser = event.message.author.get().id,
+                                                            targetGuild = guild.id,
+                                                            roles = bundle.additionalRoles.map { (roleID) ->
+                                                                Snowflake.of(
+                                                                    roleID
+                                                                )
+                                                            }.plus(role.id).toTypedArray()
+                                                        )
+                                                    )
+
+                                                event.message.addReaction(ReactionEmoji.custom(emoji))
+                                            }
+                                        }
+                                }
+                                .then()
+                        }
+                }
+            }
+            .subscribe()
+
+        alterEgo.client.eventDispatcher.on(ReactionAddEvent::class.java)
+            .filterWhen { event -> event.user.map { usr -> !usr.isBot } }
+            .flatMap { event ->
+                event.guild.flatMap { guild ->
+                    event.message.flatMap { message ->
+                        val reactionString = event.emoji.asFormat()
+                        val awaitingPermission = awaitingPermissionForRole[event.messageId.asLong()]
+                        val awaitingConfirmation = awaitingConfirmationForRole[event.messageId.asLong()]
+
+                        val awaitingPermissionMono =
+                            (awaitingPermission?.run { Flux.fromIterable(this) } ?: Flux.empty())
+                                .filter { request -> request.key == reactionString }
+                                .filterWhen {
+                                    event.user.flatMap { user -> user.asMember(guild.id) }
+                                        .flatMap(Member::getBasePermissions)
+                                        .map { perms ->
+                                            perms.contains(Permission.ADMINISTRATOR) || perms.contains(Permission.MANAGE_ROLES)
+                                        }
+                                }
+                                .flatMap { request -> request.fulfill(event.client).then(Mono.just(request)) }
+                                .count()
+
+                        val awaitingConfirmationMono =
+                            (awaitingConfirmation?.run { Flux.fromIterable(this) } ?: Flux.empty())
+                                .filter { request -> request.key == reactionString }
+                                .filter { message.author.map { user -> user.id == event.userId }.orElse(false) }
+                                .flatMap { request -> request.fulfill(event.client).then(Mono.just(request)) }
+                                .count()
+
+                        awaitingPermissionMono
+                            .switchIfEmpty(Mono.just(0))
+                            .flatMap { count ->
+                                awaitingConfirmationMono.switchIfEmpty(Mono.just(0))
+                                    .map { localCount -> localCount + count }
+                            }
+                            .flatMap { count -> if (count > 0) message.removeAllReactions() else Mono.empty() }
+                    }
+                }
+            }
+            .subscribe()
+
+        alterEgo.client.eventDispatcher.on(MemberUpdateEvent::class.java)
+            .flatMap { event ->
+                if (!event.old.isPresent)
+                    Mono.empty<Void>()
+                else {
+                    val oldRoles = event.old.get().roleIds
+                    val currentRoles = event.currentRoles
+                    val newRoles = event.currentRoles.toMutableList().apply { removeAll(oldRoles) }
+
+                    Flux.concat(
+                        newRoles.filter { roleID -> roleID.asLong() in exclusiveRoles }
+                            .flatMap { roleID -> (exclusiveRoles[roleID.asLong()] ?: emptyList<Long>()) }
+                            .filter { exclusiveRole -> currentRoles.any { currentID -> currentID.asLong() == exclusiveRole } }
+                            .map { removing -> event.member.flatMap { member -> member.removeRole(Snowflake.of(removing)) } }
+                    )
+                }
+            }
+            .subscribe()
+
         alterEgo.useStatement("SELECT id, guild_id, role_id, regex, assignable FROM $ROLE_RECEIVABLE_TABLE;") { statement ->
             statement.resultSet.use { rs ->
                 while (rs.next()) {
@@ -342,6 +487,18 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                 }
             }
         }
+
+        alterEgo.useStatement("SELECT id, first_role_id, second_role_id FROM $EXCLUSIVE_ROLES_TABLE;") { statement ->
+            statement.resultSet.use { rs ->
+                while (rs.next()) {
+                    val first = rs.getString("first_role_id").toULong().toLong()
+                    val second = rs.getString("second_role_id").toULong().toLong()
+
+                    exclusiveRoles.computeIfAbsent(first) { ArrayList() }.add(second)
+                    exclusiveRoles.computeIfAbsent(second) { ArrayList() }.add(first)
+                }
+            }
+        }
     }
 
     init {
@@ -363,6 +520,15 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                     "id VARCHAR(32) NOT NULL",
                     "role_package_id VARCHAR(32) NOT NULL",
                     "role_id VARCHAR(32) NOT NULL"
+                )
+            )
+
+            statement.execute(
+                createTableSql(
+                    EXCLUSIVE_ROLES_TABLE,
+                    "id VARCHAR(32) NOT NULL",
+                    "first_role_id VARCHAR(32) NOT NULL",
+                    "second_role_id VARCHAR(32) NOT NULL"
                 )
             )
         }

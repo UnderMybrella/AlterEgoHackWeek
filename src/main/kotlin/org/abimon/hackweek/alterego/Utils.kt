@@ -4,6 +4,7 @@ import discord4j.core.ServiceMediator
 import discord4j.core.`object`.data.stored.MessageBean
 import discord4j.core.`object`.data.stored.embed.EmbedFieldBean
 import discord4j.core.`object`.entity.*
+import discord4j.core.`object`.reaction.ReactionEmoji
 import discord4j.core.util.EntityUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -44,12 +45,15 @@ fun PreparedStatement.setIntOrNull(index: Int, int: Int?) {
     else
         setNull(index, Types.INTEGER)
 }
+
 fun ResultSet.getIntOrNull(columnName: String): Int? = getInt(columnName).takeUnless { wasNull() }
 
 @ExperimentalCoroutinesApi
-fun <T: Any> wrapMono(context: CoroutineContext = Dispatchers.Default, block: suspend () -> T?): Mono<T> = GlobalScope.async { block() }.asMono(context)
+fun <T : Any> wrapMono(context: CoroutineContext = Dispatchers.Default, block: suspend () -> T?): Mono<T> =
+    GlobalScope.async { block() }.asMono(context)
 
-fun discordSnowflakeForTime(time: Instant): String = ((time.toEpochMilli() - EntityUtil.DISCORD_EPOCH) shl 22).toString()
+fun discordSnowflakeForTime(time: Instant): String =
+    ((time.toEpochMilli() - EntityUtil.DISCORD_EPOCH) shl 22).toString()
 
 val MESSAGE_DATA_FIELD = Message::class.java.getDeclaredField("data").apply { isAccessible = true }
 val MESSAGE_SERVICE_MEDIATOR = Message::class.java.getDeclaredField("serviceMediator").apply { isAccessible = true }
@@ -91,6 +95,7 @@ fun <T> MutableList<T>.popOrNull(): T? = if (isEmpty()) null else removeAt(0)
  * Borrowed from https://stackoverflow.com/a/3366634
  */
 val regex: Pattern = Pattern.compile("\"((?:\\\\\"|[^\"])*)\"|(\\S+)")
+
 fun String.parameters(): List<String> {
     val m = regex.matcher(this)
     val results: MutableList<String> = ArrayList()
@@ -121,18 +126,32 @@ fun String.parameters(limit: Int): List<String> {
                 break
             }
         }
-    } catch (ignored: IndexOutOfBoundsException) {}
+    } catch (ignored: IndexOutOfBoundsException) {
+    }
 
     return results
 }
 
 @ExperimentalUnsignedTypes
 @ExperimentalCoroutinesApi
-fun AlterEgo.prefixFor(channel: Channel): String = if (channel is GuildChannel) prefixFor(channel.guildId.asLong()) else defaultPrefix
+fun AlterEgo.prefixFor(channel: Channel): String =
+    if (channel is GuildChannel) prefixFor(channel.guildId.asLong()) else defaultPrefix
 
 val NON_NUMERIC_REGEX = "\\D".toRegex()
 fun Guild.findRoleByIdentifier(identifier: String): Mono<Role> {
     val identifierNumeric = identifier.replace(NON_NUMERIC_REGEX, "")
-    return roles.filter { role -> role.id.asString() == identifier || role.id.asString() == identifierNumeric || role.name.equals(identifier, true) }
+    return roles.filter { role ->
+        role.id.asString() == identifier || role.id.asString() == identifierNumeric || role.name.equals(
+            identifier,
+            true
+        )
+    }
         .next()
 }
+
+fun ReactionEmoji.asFormat(): String =
+    when (this) {
+        is ReactionEmoji.Custom -> '<' + (if (isAnimated) "a" else "") + ':' + name + ':' + id.asString() + '>'
+        is ReactionEmoji.Unicode -> raw
+        else -> toString()
+    }
