@@ -2,6 +2,8 @@
 
 A rewrite of my 'Alter Ego' bot from the /r/danganronpa server, for Hack Week. The default prefix is "~|", but Alter Ego also responds to mentions.
 
+Needs MANAGE_EMOJIS, MANAGE_CHANNELS, and MANAGE_ROLES.
+
 ## Running
 Check the releases page for the jar file. Tested on Java 8.
 Run like so: `java -jar AlterEgoHackWeek.jar`.
