@@ -17,6 +17,7 @@ import org.abimon.hackweek.alterego.requests.AddRolesRequest
 import org.abimon.hackweek.alterego.requests.ClientRequest
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
+import reactor.core.publisher.switchIfEmpty
 import java.sql.ResultSet
 import java.time.Clock
 import java.time.Duration
@@ -61,11 +62,11 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
 
     data class SafetyNet(
         val guildID: String,
-        val userInfoChannelID: String?,
-        val safetyNetEnabled: Boolean,
-        val safetyNetDelay: Int,
-        val safetyNetAllowEmoji: ReactionEmoji?,
-        val safetyNetDenyEmoji: ReactionEmoji?
+        var userInfoChannelID: String?,
+        var safetyNetEnabled: Boolean,
+        var safetyNetDelay: Int,
+        var safetyNetAllowEmoji: ReactionEmoji?,
+        var safetyNetDenyEmoji: ReactionEmoji?
     ) {
         companion object {
             fun reactionEmojiOf(str: String): ReactionEmoji {
@@ -76,7 +77,7 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                     return ReactionEmoji.custom(
                         Snowflake.of(components[1]),
                         components[0],
-                        components.getOrNull(2)?.toBoolean() ?: false
+                        components.size == 3
                     )
                 }
             }
@@ -211,11 +212,307 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                 }
             }
             .subscribe()
+
+        alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
+            .map(MessageCreateEvent::getMessage)
+            .filter(alterEgo::messageSentByUser)
+            .filterWhen(alterEgo::messageRequiresManageRolesPermission)
+            .flatMap { msg -> alterEgo.stripMessagePrefix(msg) }
+            .flatMap { msg ->
+                alterEgo.stripCommandFromMessage(
+                    msg,
+                    COMMAND_REMOVE_GREETNG_NAME,
+                    commandRemoveGreeting
+                )
+            }
+            .flatMap { msg ->
+                msg.guild.flatMap { guild ->
+                    userGreetings.remove(guild.id.asLong())
+
+                    wrapMono(defaultContext) {
+                        alterEgo.usePreparedStatement("DELETE FROM $GREETINGS_TABLE_NAME WHERE guild_id = ?;") { prepared ->
+                            prepared.setString(1, guild.id.asString())
+                            prepared.execute()
+                        }
+                    }.flatMap {
+                        msg.channel.flatMap { channel ->
+                            channel.createMessage("All finished; I won't send any greetings to this server anymore.")
+                        }
+                    }
+                }
+            }
+            .subscribe()
+
+        alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
+            .map(MessageCreateEvent::getMessage)
+            .filter(alterEgo::messageSentByUser)
+            .filterWhen(alterEgo::messageRequiresManageRolesPermission)
+            .flatMap { msg -> alterEgo.stripMessagePrefix(msg) }
+            .flatMap { msg ->
+                alterEgo.stripCommandFromMessage(
+                    msg,
+                    COMMAND_SHOW_GREETING_NAME,
+                    commandShowGreeting
+                )
+            }
+            .flatMap { msg ->
+                msg.guild.flatMap { guild ->
+                    msg.client.self.flatMap { self -> self.asMember(guild.id) }.flatMap { self ->
+                        msg.authorAsMember.flatMap { author ->
+                            val greeting = userGreetings[guild.id.asLong()]
+
+                            msg.channel.flatMap { channel ->
+                                if (greeting == null) {
+                                    channel.createMessage("There is no greetings channel set up for this server")
+                                } else {
+                                    channel.createMessage { spec ->
+                                        spec.setContent("I'm currently set up to give greetings in <#${greeting.greetingChannel}>, which look like this...")
+                                        spec.setEmbed { embedSpec ->
+                                            embedSpec.setAuthor(self.displayName, null, self.avatarUrl)
+                                            embedSpec.setDescription(
+                                                greeting.greeting
+                                                    .replace("%user.mention", author.mention)
+                                                    .replace("%user.name", author.username)
+                                                    .replace("%user.id", author.id.asString())
+                                                    .replace(
+                                                        "%time",
+                                                        author.joinTime.atOffset(ZoneOffset.UTC).format(
+                                                            DateTimeFormatter.RFC_1123_DATE_TIME
+                                                        )
+                                                    )
+                                            )
+                                            embedSpec.addField("In", "<#${greeting.greetingChannel}>", true)
+                                            embedSpec.addField("\u200B", "\u200B", true)
+                                            if (greeting.newbieRole != null)
+                                                embedSpec.addField("With Role", "<@&${greeting.newbieRole}>", true)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .subscribe()
+    }
+
+    fun registerSafetyNet() {
+        alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
+            .map(MessageCreateEvent::getMessage)
+            .filter(alterEgo::messageSentByUser)
+            .filterWhen(alterEgo::messageRequiresManageRolesPermission)
+            .flatMap { msg -> alterEgo.stripMessagePrefix(msg) }
+            .flatMap { msg ->
+                alterEgo.stripCommandFromMessage(
+                    msg,
+                    COMMAND_CHANGE_SAFETY_NET_NAME,
+                    commandChangeSafetyNet
+                )
+            }
+            .flatMap { msg ->
+                msg.guild.flatMap local@{ guild ->
+                    val parameters = msg.content.orElse("").parameters()
+
+                    if (parameters.size < 2 || !parameters[0].let { str ->
+                            str.equals("info", true)
+                                    || str.equals("enabled", true)
+                                    || str.equals("delay", true)
+                                    || str.equals("allow_emoji", true)
+                                    || str.equals("deny_emoji", true)
+                        })
+                        return@local msg.channel.flatMap { channel ->
+                            channel.createMessage(
+                                "Invalid parameters supplied!\n" +
+                                        "Syntax: ${alterEgo.prefixFor(channel)}$commandChangeSafetyNet {info channel} {"
+                            )
+                        }
+
+                    val safetyNet =
+                        safetyNets[guild.id.asLong()] ?: SafetyNet(guild.id.asString(), null, false, 5_000, null, null)
+                    val component = parameters[0]
+                    val value = parameters[1]
+                    val mono = when {
+                        component.equals("info", true) -> {
+                            guild.findChannelByIdentifier(value)
+                                .switchIfEmpty { println("Empty channel: $value"); Mono.empty() }
+                                .map { channel ->
+                                    safetyNet.userInfoChannelID = channel.id.asString()
+                                    safetyNet
+                                }
+                        }
+                        component.equals("enabled", true) -> {
+                            Mono.just(safetyNet)
+                                .map { net ->
+                                    net.safetyNetEnabled = value.toBoolean()
+                                    net
+                                }
+                        }
+                        component.equals("delay", true) -> {
+                            Mono.just(safetyNet)
+                                .map { net ->
+                                    net.safetyNetDelay = value.toIntOrNull() ?: 5_000
+                                    net
+                                }
+                        }
+                        component.equals("allow_emoji", true) -> {
+                            Mono.just(safetyNet)
+                                .map { net ->
+                                    if (value.matches(EMOJI_REGEX)) {
+                                        val animated = value.startsWith("<a:")
+                                        val emoji = value.trim('<', '>').split(':')
+                                        net.safetyNetAllowEmoji =
+                                            ReactionEmoji.custom(Snowflake.of(emoji[2]), emoji[1], animated)
+                                    } else {
+                                        net.safetyNetAllowEmoji = null
+                                    }
+
+                                    net
+                                }
+                        }
+                        component.equals("deny_emoji", true) -> {
+                            Mono.just(safetyNet)
+                                .map { net ->
+                                    if (value.matches(EMOJI_REGEX)) {
+                                        val animated = value.startsWith("<a:")
+                                        val emoji = value.trim('<', '>').split(':')
+                                        net.safetyNetDenyEmoji =
+                                            ReactionEmoji.custom(Snowflake.of(emoji[2]), emoji[1], animated)
+                                    } else {
+                                        net.safetyNetDenyEmoji = null
+                                    }
+
+                                    net
+                                }
+                        }
+                        else -> Mono.empty<SafetyNet>()
+                    }
+
+                    mono.flatMap { net ->
+                        wrapMono {
+                            val exists =
+                                alterEgo.usePreparedStatement("SELECT guild_id FROM $SAFETY_NET_TABLE_NAME WHERE guild_id = ?;") { prepared ->
+                                    prepared.setString(1, net.guildID)
+                                    prepared.execute()
+
+                                    prepared.resultSet.use(ResultSet::next)
+                                }
+
+                            if (exists) {
+                                alterEgo.usePreparedStatement("UPDATE $SAFETY_NET_TABLE_NAME SET user_info_channel_id = ?, safety_net_enabled = ?, safety_net_delay = ?, safety_net_allow_emoji = ?, safety_net_deny_emoji = ? WHERE guild_id = ?") { prepared ->
+                                    prepared.setString(1, net.userInfoChannelID)
+                                    prepared.setBoolean(2, net.safetyNetEnabled)
+                                    prepared.setInt(3, net.safetyNetDelay)
+                                    prepared.setString(4, net.safetyNetAllowEmoji?.asStorage())
+                                    prepared.setString(5, net.safetyNetDenyEmoji?.asStorage())
+                                    prepared.setString(6, net.guildID)
+
+                                    prepared.execute()
+                                }
+                            } else {
+                                alterEgo.usePreparedStatement("INSERT INTO $SAFETY_NET_TABLE_NAME (guild_id, user_info_channel_id, safety_net_enabled, safety_net_delay, safety_net_allow_emoji, safety_net_deny_emoji) VALUES (?, ?, ?, ?, ?, ?);") { prepared ->
+                                    prepared.setString(1, net.guildID)
+                                    prepared.setString(2, net.userInfoChannelID)
+                                    prepared.setBoolean(3, net.safetyNetEnabled)
+                                    prepared.setInt(4, net.safetyNetDelay)
+                                    prepared.setString(5, net.safetyNetAllowEmoji?.asStorage())
+                                    prepared.setString(6, net.safetyNetDenyEmoji?.asStorage())
+
+                                    prepared.execute()
+                                }
+                            }
+
+                            safetyNets[guild.id.asLong()] = net
+                        }
+                            .flatMap {
+                                msg.channel.flatMap { channel ->
+                                    channel.createMessage("Updated the safety net for this server")
+                                }
+                            }
+                    }
+                }
+            }
+            .subscribe()
+
+        alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
+            .map(MessageCreateEvent::getMessage)
+            .filter(alterEgo::messageSentByUser)
+            .filterWhen(alterEgo::messageRequiresManageRolesPermission)
+            .flatMap { msg -> alterEgo.stripMessagePrefix(msg) }
+            .flatMap { msg ->
+                alterEgo.stripCommandFromMessage(
+                    msg,
+                    COMMAND_REMOVE_SAFETY_NET_NAME,
+                    commandRemoveSafetyNet
+                )
+            }
+            .flatMap { msg ->
+                msg.guild.flatMap { guild ->
+                    safetyNets.remove(guild.id.asLong())
+
+                    wrapMono {
+                        alterEgo.usePreparedStatement("DELETE FROM $SAFETY_NET_TABLE_NAME WHERE guild_id = ?;") { prepared ->
+                            prepared.setString(1, guild.id.asString())
+                            prepared.execute()
+                        }
+                    }.flatMap {
+                        msg.channel.flatMap { channel ->
+                            channel.createMessage("The safety net for this server has been removed, be careful...")
+                        }
+                    }
+                }
+            }
+            .subscribe()
+
+        alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
+            .map(MessageCreateEvent::getMessage)
+            .filter(alterEgo::messageSentByUser)
+            .filterWhen(alterEgo::messageRequiresManageRolesPermission)
+            .flatMap { msg -> alterEgo.stripMessagePrefix(msg) }
+            .flatMap { msg ->
+                alterEgo.stripCommandFromMessage(
+                    msg,
+                    COMMAND_SHOW_SAFETY_NET_NAME,
+                    commandShowSafetyNet
+                )
+            }
+            .flatMap { msg ->
+                msg.guild.flatMap { guild ->
+                    val safetyNet = safetyNets[guild.id.asLong()]
+
+                    msg.channel.flatMap { channel ->
+                        if (safetyNet == null) {
+                            channel.createMessage("No safety net is up; roles won't be restored when users rejoin.")
+                        } else {
+                            channel.createEmbed { spec ->
+                                spec.setTitle("=={${guild.name} Safety Net}==")
+                                spec.setDescription(buildString {
+                                    safetyNet.userInfoChannelID?.let { infoChannel ->
+                                        appendln("When a user rejoins, a message will be posted to <#$infoChannel> with details.")
+                                        appendln("After ${secondsFormatter.format(safetyNet.safetyNetDelay.toDouble() / 1000.0)} seconds, roles will be re-added.")
+                                        if (safetyNet.safetyNetAllowEmoji != null && safetyNet.safetyNetDenyEmoji != null) {
+                                            appendln("Before that, a moderator can add ${safetyNet.safetyNetAllowEmoji!!.asFormat()} to add the roles, or ${safetyNet.safetyNetDenyEmoji!!.asFormat()} to cancel the role addition.")
+                                        } else if (safetyNet.safetyNetAllowEmoji != null) {
+                                            appendln("Before that, a moderator can add ${safetyNet.safetyNetAllowEmoji!!.asFormat()} to add the roles.")
+                                        } else if (safetyNet.safetyNetDenyEmoji != null) {
+                                            appendln("Before that, a moderator can add ${safetyNet.safetyNetDenyEmoji!!.asFormat()} to cancel the role addition.")
+                                        } else {
+                                        }
+                                    } ?: run {
+                                        appendln("When a user rejoins, after ${secondsFormatter.format(safetyNet.safetyNetDelay.toDouble() / 1000.0)} seconds, their old roles will be re-added.")
+                                    }
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+            .subscribe()
     }
 
     override fun register() {
         registerOnJoin()
         registerGreetings()
+        registerSafetyNet()
 
         alterEgo.client.eventDispatcher.on(ReactionAddEvent::class.java)
             .filter { event -> event.messageId.asLong() in waitingForRoles }

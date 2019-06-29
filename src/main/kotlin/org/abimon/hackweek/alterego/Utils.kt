@@ -15,6 +15,7 @@ import reactor.core.publisher.Mono
 import java.sql.PreparedStatement
 import java.sql.ResultSet
 import java.sql.Types
+import java.text.DecimalFormat
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.regex.Pattern
@@ -138,6 +139,8 @@ fun AlterEgo.prefixFor(channel: Channel): String =
     if (channel is GuildChannel) prefixFor(channel.guildId.asLong()) else defaultPrefix
 
 val NON_NUMERIC_REGEX = "\\D".toRegex()
+val EMOJI_REGEX = "<a?:\\w+:\\d+>".toRegex()
+
 fun Guild.findRoleByIdentifier(identifier: String): Mono<Role> {
     val identifierNumeric = identifier.replace(NON_NUMERIC_REGEX, "")
     return roles.filter { role ->
@@ -176,6 +179,14 @@ fun <T> List<T>.zipTogether(): List<Pair<T, T>> =
 fun ReactionEmoji.asFormat(): String =
     when (this) {
         is ReactionEmoji.Custom -> '<' + (if (isAnimated) "a" else "") + ':' + name + ':' + id.asString() + '>'
+        is ReactionEmoji.Unicode -> raw
+        else -> toString()
+    }
+
+val secondsFormatter = DecimalFormat("0.##")
+fun ReactionEmoji.asStorage(): String =
+    when (this) {
+        is ReactionEmoji.Custom -> name + '|' + id.asString() + (if (isAnimated) "|a" else "")
         is ReactionEmoji.Unicode -> raw
         else -> toString()
     }
