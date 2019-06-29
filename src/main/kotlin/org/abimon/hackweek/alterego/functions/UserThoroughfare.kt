@@ -323,7 +323,7 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                         return@local msg.channel.flatMap { channel ->
                             channel.createMessage(
                                 "Invalid parameters supplied!\n" +
-                                        "Syntax: ${alterEgo.prefixFor(channel)}$commandChangeSafetyNet {info channel} {"
+                                        "Syntax: ${alterEgo.prefixFor(channel)}$commandChangeSafetyNet [info | delay | allow_emoji | deny_emoji] [value]"
                             )
                         }
 
@@ -582,7 +582,7 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                     }
                 }.flatMap<Void> { oldRoles ->
                     if (safetyNet.userInfoChannelID != null) {
-                        return@flatMap event.guild.flatMap { guild -> guild.getChannelById(Snowflake.of(safetyNet.userInfoChannelID)) }
+                        return@flatMap event.guild.flatMap { guild -> guild.getChannelById(Snowflake.of(safetyNet.userInfoChannelID!!)) }
                             .ofType(GuildMessageChannel::class.java)
                             .flatMap { channel ->
                                 wrapMono(roleUpdateContext) {
@@ -605,6 +605,11 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                                             member.joinTime.atOffset(ZoneOffset.UTC).format(DateTimeFormatter.RFC_1123_DATE_TIME),
                                             false
                                         )
+                                        spec.addField(
+                                            "Account Creation Date",
+                                            member.id.timestamp.atOffset(ZoneOffset.UTC).format(DateTimeFormatter.RFC_1123_DATE_TIME),
+                                            false
+                                        )
 
                                         lastSeenOptional.ifPresent { lastSeen ->
                                             spec.addField(
@@ -625,7 +630,7 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                                         }
                                     }
                                 }.flatMap { msg ->
-                                    if (oldRoles.isNotEmpty()) {
+                                    if (oldRoles.isNotEmpty() && safetyNet.safetyNetDelay != -1) {
                                         waitingForRoles[msg.id.asLong()] = AddRolesRequest(
                                             key = "old_roles",
                                             targetGuild = event.guildId,
@@ -646,9 +651,11 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                                     }
                                 }
                             }
-                    } else {
+                    } else if (safetyNet.safetyNetDelay != -1) {
                         return@flatMap Flux.concat(oldRoles.map { roleID -> member.addRole(Snowflake.of(roleID)) })
                             .then()
+                    } else {
+                        return@flatMap Mono.empty()
                     }
                 }
             }

@@ -17,10 +17,7 @@ import discord4j.rest.response.ResponseFunction
 import discord4j.store.api.mapping.MappingStoreService
 import discord4j.store.jdk.JdkStoreService
 import kotlinx.coroutines.*
-import org.abimon.hackweek.alterego.functions.AutoChannelSlowMode
-import org.abimon.hackweek.alterego.functions.MetaModule
-import org.abimon.hackweek.alterego.functions.RolesModule
-import org.abimon.hackweek.alterego.functions.UserThoroughfare
+import org.abimon.hackweek.alterego.functions.*
 import org.abimon.hackweek.alterego.stores.GrandCentralService
 import org.abimon.hackweek.alterego.stores.GrandJdbcStation
 import org.abimon.hackweek.alterego.stores.MessageTableBean
@@ -319,6 +316,7 @@ class AlterEgo(val config: Properties) {
         MetaModule(this).register()
         UserThoroughfare(this).register()
         RolesModule(this).register()
+        HelpModule(this).register()
 
         println()
 
