@@ -3,19 +3,18 @@ package org.abimon.hackweek.alterego.functions
 import discord4j.core.DiscordClient
 import discord4j.core.`object`.entity.*
 import discord4j.core.`object`.reaction.ReactionEmoji
+import discord4j.core.`object`.util.Permission
 import discord4j.core.`object`.util.Snowflake
 import discord4j.core.event.domain.guild.*
 import discord4j.core.event.domain.lifecycle.ResumeEvent
+import discord4j.core.event.domain.message.MessageCreateEvent
 import discord4j.core.event.domain.message.ReactionAddEvent
 import discord4j.core.event.domain.role.RoleDeleteEvent
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
-import org.abimon.hackweek.alterego.AlterEgo
-import org.abimon.hackweek.alterego.CoroutineReactorScheduler
-import org.abimon.hackweek.alterego.createTableSql
+import org.abimon.hackweek.alterego.*
 import org.abimon.hackweek.alterego.requests.AddRolesRequest
 import org.abimon.hackweek.alterego.requests.ClientRequest
-import org.abimon.hackweek.alterego.wrapMono
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import java.sql.ResultSet
@@ -35,6 +34,24 @@ import kotlin.collections.HashMap
 @ExperimentalCoroutinesApi
 class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
     companion object {
+        val COMMAND_CHANGE_GREETING_NAME = "users.greeting.change"
+        val COMMAND_CHANGE_GREETING_DEFAULT = "users change greeting"
+
+        val COMMAND_REMOVE_GREETNG_NAME = "users.greeting.remove"
+        val COMMAND_REMOVE_GREETING_DEFAULT = "users remove greeting"
+
+        val COMMAND_SHOW_GREETING_NAME = "users.greeting.show"
+        val COMMAND_SHOW_GREETING_DEFAULT = "users show greeting"
+
+        val COMMAND_CHANGE_SAFETY_NET_NAME = "users.safety.change"
+        val COMMAND_CHANGE_SAFETY_NET_DEFAULT = "users change safety net"
+
+        val COMMAND_REMOVE_SAFETY_NET_NAME = "users.safety.remove"
+        val COMMAND_REMOVE_SAFETY_NET_DEFAULT = "users remove safety net"
+
+        val COMMAND_SHOW_SAFETY_NET_NAME = "users.safety.show"
+        val COMMAND_SHOW_SAFETY_NET_DEFAULT = "users show safety net"
+
         fun joinThread(runnable: Runnable): Thread {
             val thread = Thread(runnable, "user-join-scheduler")
             thread.isDaemon = true
@@ -74,6 +91,7 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
             rs.getString("safety_net_deny_emoji")?.let(Companion::reactionEmojiOf)
         )
     }
+
     data class UserGreeting(
         val guildID: String,
         val greetingChannel: String,
@@ -94,6 +112,14 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
 
     val GREETINGS_TABLE_NAME = "greetings"
 
+    val commandChangeGreeting = command(COMMAND_CHANGE_GREETING_NAME) ?: COMMAND_CHANGE_GREETING_DEFAULT
+    val commandRemoveGreeting = command(COMMAND_REMOVE_GREETNG_NAME) ?: COMMAND_REMOVE_GREETING_DEFAULT
+    val commandShowGreeting = command(COMMAND_SHOW_GREETING_NAME) ?: COMMAND_SHOW_GREETING_DEFAULT
+
+    val commandChangeSafetyNet = command(COMMAND_CHANGE_SAFETY_NET_NAME) ?: COMMAND_CHANGE_SAFETY_NET_DEFAULT
+    val commandRemoveSafetyNet = command(COMMAND_REMOVE_SAFETY_NET_NAME) ?: COMMAND_REMOVE_SAFETY_NET_DEFAULT
+    val commandShowSafetyNet = command(COMMAND_SHOW_SAFETY_NET_NAME) ?: COMMAND_SHOW_SAFETY_NET_DEFAULT
+
     val utc = Clock.systemUTC()
 
     val safetyNets: MutableMap<Long, SafetyNet> = HashMap()
@@ -106,15 +132,100 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
 
     val waitingForRoles: ConcurrentMap<Long, ClientRequest<Void>> = ConcurrentHashMap()
 
+    fun registerGreetings() {
+        alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
+            .map(MessageCreateEvent::getMessage)
+            .filter(alterEgo::messageSentByUser)
+            .filterWhen(alterEgo::messageRequiresManageRolesPermission)
+            .flatMap { msg -> alterEgo.stripMessagePrefix(msg) }
+            .flatMap { msg ->
+                alterEgo.stripCommandFromMessage(
+                    msg,
+                    COMMAND_CHANGE_GREETING_NAME,
+                    commandChangeGreeting
+                )
+            }
+            .flatMap { msg ->
+                val parameters = msg.content.orElse("").parameters()
+
+                if (parameters.size < 2)
+                    return@flatMap msg.channel.flatMap { channel ->
+                        channel.createMessage(
+                            "Invalid parameters supplied!\n" +
+                                    "Syntax: ${alterEgo.prefixFor(channel)}$commandChangeGreeting [channel id] [greeting] {newbie role}"
+                        )
+                    }
+
+                msg.guild.flatMap { guild ->
+                    guild.findChannelByIdentifier(parameters[0]).flatMap { channel ->
+                        (parameters.getOrNull(2)?.let(guild::findRoleByIdentifier)?.map { Optional.of(it) }
+                            ?: Mono.just(Optional.empty())).flatMap inner@{ newbieRoleOpt ->
+                            val channelID = channel.id.asString()
+                            val greeting = parameters[1]
+                            val newbieRole = newbieRoleOpt.orElse(null)?.id?.asString()
+                            userGreetings[guild.id.asLong()] =
+                                UserGreeting(guild.id.asString(), channelID, greeting, newbieRole)
+
+                            wrapMono(defaultContext) {
+                                val exists =
+                                    alterEgo.usePreparedStatement("SELECT guild_id FROM $GREETINGS_TABLE_NAME WHERE guild_id = ?;") { prepared ->
+                                        prepared.setString(1, guild.id.asString())
+                                        prepared.execute()
+
+                                        prepared.resultSet.use(ResultSet::next)
+                                    }
+
+                                if (exists) {
+                                    alterEgo.usePreparedStatement("UPDATE $GREETINGS_TABLE_NAME SET greetings_channel = ?, greeting = ?, newbie_role = ? WHERE guild_id = ?;") { prepared ->
+                                        prepared.setString(1, channelID)
+                                        prepared.setString(2, greeting)
+                                        prepared.setString(3, newbieRole)
+                                        prepared.setString(4, guild.id.asString())
+
+                                        prepared.execute()
+                                    }
+                                } else {
+                                    alterEgo.usePreparedStatement("INSERT INTO $GREETINGS_TABLE_NAME (guild_id, greetings_channel, greeting, newbie_role) VALUES (?, ?, ?, ?);") { prepared ->
+                                        prepared.setString(1, guild.id.asString())
+                                        prepared.setString(2, channelID)
+                                        prepared.setString(3, greeting)
+                                        prepared.setString(4, newbieRole)
+
+                                        prepared.execute()
+                                    }
+                                }
+                            }.flatMap {
+                                msg.channel.flatMap { channel ->
+                                    channel.createEmbed { spec ->
+                                        spec.setDescription(buildString {
+                                            appendln("All done!")
+                                            append("When users join, we'll send them a welcome message in <#$channelID>")
+                                            if (newbieRole != null)
+                                                append(", and give them the <@&$newbieRole> role")
+                                        })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .subscribe()
+    }
+
     override fun register() {
         registerOnJoin()
+        registerGreetings()
 
         alterEgo.client.eventDispatcher.on(ReactionAddEvent::class.java)
             .filter { event -> event.messageId.asLong() in waitingForRoles }
             .filterWhen { event ->
-                event.message
-                    .filterWhen(alterEgo::messageRequiresManageRolesPermission)
-                    .map(alterEgo::messageSentByUser)
+                event.guildId.map { guildID ->
+                    event.user.filter { user -> !user.isBot }
+                        .flatMap { user -> user.asMember(guildID) }
+                        .flatMap(Member::getBasePermissions)
+                        .map { perms -> perms.contains(Permission.MANAGE_ROLES) || perms.contains(Permission.ADMINISTRATOR) }
+                }.orElse(Mono.empty())
             }
             .flatMap<Void> { event ->
                 val safetyNet = safetyNets[event.guildId.get().asLong()] ?: return@flatMap Mono.empty()
@@ -251,21 +362,22 @@ class UserThoroughfare(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
             .flatMap { event ->
                 val greetings = userGreetings[event.guildId.asLong()] ?: return@flatMap Mono.empty<Message>()
 
-                val messageMono = event.guild.flatMap { guild -> guild.getChannelById(Snowflake.of(greetings.greetingChannel)) }
-                    .ofType(GuildMessageChannel::class.java)
-                    .delayElement(Duration.ofMillis(2_000))
-                    .flatMap { channel ->
-                        channel.createMessage(
-                            greetings.greeting
-                                .replace("%user.mention", event.member.mention)
-                                .replace("%user.name", event.member.username)
-                                .replace("%user.id", event.member.id.asString())
-                                .replace(
-                                    "%time",
-                                    event.member.joinTime.atOffset(ZoneOffset.UTC).format(DateTimeFormatter.RFC_1123_DATE_TIME)
-                                )
-                        )
-                    }
+                val messageMono =
+                    event.guild.flatMap { guild -> guild.getChannelById(Snowflake.of(greetings.greetingChannel)) }
+                        .ofType(GuildMessageChannel::class.java)
+                        .delayElement(Duration.ofMillis(2_000))
+                        .flatMap { channel ->
+                            channel.createMessage(
+                                greetings.greeting
+                                    .replace("%user.mention", event.member.mention)
+                                    .replace("%user.name", event.member.username)
+                                    .replace("%user.id", event.member.id.asString())
+                                    .replace(
+                                        "%time",
+                                        event.member.joinTime.atOffset(ZoneOffset.UTC).format(DateTimeFormatter.RFC_1123_DATE_TIME)
+                                    )
+                            )
+                        }
 
                 if (greetings.newbieRole != null) {
                     event.member.addRole(Snowflake.of(greetings.newbieRole))

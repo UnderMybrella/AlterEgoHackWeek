@@ -149,6 +149,17 @@ fun Guild.findRoleByIdentifier(identifier: String): Mono<Role> {
         .next()
 }
 
+fun Guild.findChannelByIdentifier(identifier: String): Mono<GuildChannel> {
+    val identifierNumeric = identifier.replace(NON_NUMERIC_REGEX, "")
+    return channels.filter { channel ->
+        channel.id.asString() == identifier || channel.id.asString() == identifierNumeric || channel.name.equals(
+            identifier,
+            true
+        )
+    }
+        .next()
+}
+
 fun List<Role>.findRoleByIdentifier(identifier: String): Role? {
     val identifierNumeric = identifier.replace(NON_NUMERIC_REGEX, "")
     return firstOrNull { role ->
@@ -156,7 +167,8 @@ fun List<Role>.findRoleByIdentifier(identifier: String): Role? {
             identifier,
             true
         )
-    } }
+    }
+}
 
 fun <T> List<T>.zipTogether(): List<Pair<T, T>> =
     flatMap { t -> this.mapNotNull { r -> if (t != r) Pair(t, r) else null } }
