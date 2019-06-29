@@ -3,6 +3,7 @@ package org.abimon.hackweek.alterego.functions
 import discord4j.core.`object`.entity.GuildEmoji
 import discord4j.core.`object`.entity.Member
 import discord4j.core.`object`.entity.Message
+import discord4j.core.`object`.entity.Role
 import discord4j.core.`object`.reaction.ReactionEmoji
 import discord4j.core.`object`.util.Image
 import discord4j.core.`object`.util.Permission
@@ -15,7 +16,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import org.abimon.hackweek.alterego.*
-import org.abimon.hackweek.alterego.requests.AddRolesRequest
+import org.abimon.hackweek.alterego.requests.ToggleRolesRequest
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.publisher.switchIfEmpty
@@ -23,6 +24,7 @@ import java.awt.Color
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.sql.ResultSet
+import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.regex.PatternSyntaxException
@@ -33,13 +35,22 @@ import javax.imageio.ImageIO
 class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
     companion object {
         val COMMAND_BUNDLE_CREATE_NAME = "roles.bundle.create"
-        val COMMAND_BUNDLE_CREATE_DEFAULT = "role bundle create"
+        val COMMAND_BUNDLE_CREATE_DEFAULT = "roles create bundle"
 
         val COMMAND_BUNDLE_REMOVE_NAME = "roles.bundle.remove"
-        val COMMAND_BUNDLE_REMOVE_DEFAULT = "role bundle remove"
+        val COMMAND_BUNDLE_REMOVE_DEFAULT = "roles remove bundle"
 
         val COMMAND_BUNDLE_SHOW_NAME = "roles.bundle.show"
-        val COMMAND_BUNDLE_SHOW_DEFAULT = "role bundles list"
+        val COMMAND_BUNDLE_SHOW_DEFAULT = "roles list bundles"
+
+        val COMMAND_EXCLUSIVES_CREATE_NAME = "roles.exclusive.add"
+        val COMMAND_EXCLUSIVES_CREATE_DEFAULT = "roles add exclusive"
+
+        val COMMAND_EXCLUSIVES_REMOVE_NAME = "roles.exclusive.remove"
+        val COMMAND_EXCLUSIVES_REMOVE_DEFAULT = "roles remove exclusive"
+
+        val COMMAND_EXCLUSIVES_SHOW_NAME = "roles.exclusives.list "
+        val COMMAND_EXCLUSIVES_SHOW_DEFAULT = "roles list exclusives"
 
         fun matchThread(runnable: Runnable): Thread {
             val thread = Thread(runnable, "match-scheduler")
@@ -51,6 +62,10 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
     val commandBundleCreate = command(COMMAND_BUNDLE_CREATE_NAME) ?: COMMAND_BUNDLE_CREATE_DEFAULT
     val commandBundleRemove = command(COMMAND_BUNDLE_REMOVE_NAME) ?: COMMAND_BUNDLE_REMOVE_DEFAULT
     val commandBundleShow = command(COMMAND_BUNDLE_SHOW_NAME) ?: COMMAND_BUNDLE_SHOW_DEFAULT
+
+    val commandExclusivesCreate = command(COMMAND_EXCLUSIVES_CREATE_NAME) ?: COMMAND_EXCLUSIVES_CREATE_DEFAULT
+    val commandExclusivesRemove = command(COMMAND_EXCLUSIVES_REMOVE_NAME) ?: COMMAND_EXCLUSIVES_REMOVE_DEFAULT
+    val commandExclusivesShow = command(COMMAND_EXCLUSIVES_SHOW_NAME) ?: COMMAND_EXCLUSIVES_SHOW_DEFAULT
 
     data class RolePackage(
         val id: String,
@@ -83,10 +98,10 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
 
     val rolePackages: MutableMap<Long, MutableList<RolePackage>> = HashMap()
     val exclusiveRoles: MutableMap<Long, MutableList<Long>> = HashMap()
-    val awaitingPermissionForRole: MutableMap<Long, MutableList<AddRolesRequest>> = ConcurrentHashMap()
-    val awaitingConfirmationForRole: MutableMap<Long, MutableList<AddRolesRequest>> = ConcurrentHashMap()
+    val awaitingPermissionForRole: MutableMap<Long, MutableList<ToggleRolesRequest>> = ConcurrentHashMap()
+    val awaitingConfirmationForRole: MutableMap<Long, MutableList<ToggleRolesRequest>> = ConcurrentHashMap()
 
-    override fun register() {
+    fun registerBundles() {
         alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
             .map(MessageCreateEvent::getMessage)
             .filter(alterEgo::messageSentByUser)
@@ -175,7 +190,7 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                                                 if (str.length > 16) str.replaceRange(
                                                     16,
                                                     str.length,
-                                                    "..."
+                                                    ""
                                                 ) else str
                                             }}"
 
@@ -292,7 +307,8 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                         }
                     }
                 }
-            }.subscribe()
+            }
+            .subscribe()
 
         alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
             .map(MessageCreateEvent::getMessage)
@@ -324,7 +340,173 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                 }
             }
             .subscribe()
+    }
 
+    fun registerExclusives() {
+        alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
+            .map(MessageCreateEvent::getMessage)
+            .filter(alterEgo::messageSentByUser)
+            .filterWhen(alterEgo::messageRequiresManageRolesPermission)
+            .flatMap { msg -> alterEgo.stripMessagePrefix(msg) }
+            .flatMap { msg ->
+                alterEgo.stripCommandFromMessage(
+                    msg,
+                    COMMAND_EXCLUSIVES_CREATE_NAME,
+                    commandExclusivesCreate
+                )
+            }
+            .flatMap { msg ->
+                val parameters = msg.content.orElse("").parameters()
+
+                if (parameters.size < 2)
+                    return@flatMap msg.channel.flatMap { channel ->
+                        channel.createMessage(
+                            "Invalid parameters supplied!\n" +
+                                    "Syntax: ${alterEgo.prefixFor(channel)}$commandExclusivesCreate [first role id] [second role id] {additional role ids}"
+                        )
+                    }
+
+                msg.guild.flatMap { guild ->
+                    guild.roles.collectList()
+                        .flatMap { roleList ->
+                            wrapMono(defaultContext) {
+                                val parameterRoles = parameters.mapNotNull(roleList::findRoleByIdentifier)
+                                    .map(Role::getId)
+
+                                //TODO: Save space with this; it's pretty inefficient
+                                alterEgo.usePreparedStatement("INSERT INTO $EXCLUSIVE_ROLES_TABLE (id, first_role_id, second_role_id) VALUES (?, ?, ?);") { prepared ->
+                                    parameterRoles.forEach { first ->
+                                        val duelers = exclusiveRoles.computeIfAbsent(first.asLong()) { ArrayList() }
+                                        parameterRoles.forEach local@{ second ->
+                                            if (first == second || second.asLong() in duelers) {
+                                                return@local
+                                            }
+
+                                            prepared.setString(1, newID())
+                                            prepared.setString(2, first.asString())
+                                            prepared.setString(3, second.asString())
+                                            prepared.execute()
+
+                                            duelers.add(second.asLong())
+                                        }
+                                    }
+                                }
+
+                                parameterRoles
+                            }.flatMap { parameterRoles ->
+                                msg.channel.flatMap { channel ->
+                                    channel.createEmbed { spec ->
+                                        spec.setDescription(
+                                            "Defined roles as exclusive of each other: ${parameterRoles.joinToString(
+                                                prefix = "{",
+                                                postfix = "}"
+                                            ) { role -> "<@&${role.asString()}>" }}"
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                }
+            }
+            .subscribe()
+
+        alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
+            .map(MessageCreateEvent::getMessage)
+            .filter(alterEgo::messageSentByUser)
+            .filterWhen(alterEgo::messageRequiresManageRolesPermission)
+            .flatMap { msg -> alterEgo.stripMessagePrefix(msg) }
+            .flatMap { msg ->
+                alterEgo.stripCommandFromMessage(msg, COMMAND_EXCLUSIVES_REMOVE_NAME, commandExclusivesRemove)
+            }
+            .flatMap { msg ->
+                val parameters = msg.content.orElse("").parameters()
+
+                if (parameters.size < 2)
+                    return@flatMap msg.channel.flatMap { channel ->
+                        channel.createMessage(
+                            "Invalid parameters supplied!\n" +
+                                    "Syntax: ${alterEgo.prefixFor(channel)}$commandExclusivesRemove [first role id] [second role id] {additional role ids}"
+                        )
+                    }
+
+                msg.guild.flatMap { guild ->
+                    guild.roles.collectList()
+                        .flatMap { roleList ->
+                            wrapMono(defaultContext) {
+                                val parameterRoles = parameters.mapNotNull(roleList::findRoleByIdentifier)
+                                    .map(Role::getId)
+
+                                alterEgo.usePreparedStatement("DELETE FROM $EXCLUSIVE_ROLES_TABLE WHERE first_role_id = ? AND second_role_id = ?;") { prepared ->
+                                    parameterRoles.forEach { first ->
+                                        val duelers = exclusiveRoles.computeIfAbsent(first.asLong()) { ArrayList() }
+                                        parameterRoles.forEach local@{ second ->
+                                            if (first == second || second.asLong() !in duelers) {
+                                                return@local
+                                            }
+
+                                            prepared.setString(1, first.asString())
+                                            prepared.setString(2, second.asString())
+                                            prepared.execute()
+
+                                            duelers.remove(second.asLong())
+                                        }
+                                    }
+                                }
+
+                                parameterRoles
+                            }.flatMap { parameterRoles ->
+                                msg.channel.flatMap { channel ->
+                                    channel.createEmbed { spec ->
+                                        spec.setDescription(
+                                            "The following roles are no longer exclusives of each other: ${parameterRoles.joinToString(
+                                                prefix = "{",
+                                                postfix = "}"
+                                            ) { role -> "<@&${role.asString()}>" }}"
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                }
+            }
+            .subscribe()
+
+        alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
+            .map(MessageCreateEvent::getMessage)
+            .filter(alterEgo::messageSentByUser)
+            .filterWhen(alterEgo::messageRequiresManageRolesPermission)
+            .flatMap { msg -> alterEgo.stripMessagePrefix(msg) }
+            .flatMap { msg ->
+                alterEgo.stripCommandFromMessage(
+                    msg,
+                    COMMAND_EXCLUSIVES_SHOW_NAME,
+                    commandExclusivesShow
+                )
+            }
+            .flatMap { msg ->
+                msg.guild.flatMapMany { guild ->
+                    msg.channel.flatMapMany { channel ->
+                        Flux.fromIterable(exclusiveRoles.entries)
+                            .filter { (roleID) -> guild.roleIds.any { id -> id.asLong() == roleID } }
+                            .delayElements(Duration.ofSeconds(1))
+                            .flatMap { (roleID, exclusives) ->
+                                channel.createEmbed { spec ->
+                                    spec.setDescription(buildString {
+                                        appendln("==[Exclusive Roles for <@&${roleID.toUString()}>]==")
+                                        exclusives.filter { guild.roleIds.any { id -> id.asLong() == it } }
+                                            .forEach { exclusive -> appendln("-| <@&${exclusive.toUString()}>") }
+                                    })
+                                }
+                            }
+                    }
+                }
+            }
+            .subscribe()
+    }
+
+    override fun register() {
+        registerBundles()
+        registerExclusives()
         alterEgo.client.eventDispatcher.on(MessageCreateEvent::class.java)
             .publishOn(matchScheduler)
             .filter { event -> alterEgo.messageSentByUser(event.message) }
@@ -351,7 +533,7 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                                                 if (str.length > 16) str.replaceRange(
                                                     16,
                                                     str.length,
-                                                    "..."
+                                                    ""
                                                 ) else str
                                             }}"
 
@@ -361,7 +543,7 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                                             if (bundle.assignable) {
                                                 awaitingConfirmationForRole.computeIfAbsent(event.message.id.asLong()) { ArrayList() }
                                                     .add(
-                                                        AddRolesRequest(
+                                                        ToggleRolesRequest(
                                                             key = emoji.asFormat(),
                                                             targetUser = event.message.author.get().id,
                                                             targetGuild = guild.id,
@@ -379,7 +561,7 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                                             } else {
                                                 awaitingPermissionForRole.computeIfAbsent(event.message.id.asLong()) { ArrayList() }
                                                     .add(
-                                                        AddRolesRequest(
+                                                        ToggleRolesRequest(
                                                             key = emoji.asFormat(),
                                                             targetUser = event.message.author.get().id,
                                                             targetGuild = guild.id,
@@ -487,15 +669,14 @@ class RolesModule(alterEgo: AlterEgo) : AlterEgoModule(alterEgo) {
                 }
             }
         }
-
         alterEgo.useStatement("SELECT id, first_role_id, second_role_id FROM $EXCLUSIVE_ROLES_TABLE;") { statement ->
             statement.resultSet.use { rs ->
                 while (rs.next()) {
                     val first = rs.getString("first_role_id").toULong().toLong()
                     val second = rs.getString("second_role_id").toULong().toLong()
 
-                    exclusiveRoles.computeIfAbsent(first) { ArrayList() }.add(second)
-                    exclusiveRoles.computeIfAbsent(second) { ArrayList() }.add(first)
+                    exclusiveRoles.computeIfAbsent(first) { ArrayList() }.takeIf { second !in it }?.add(second)
+                    exclusiveRoles.computeIfAbsent(second) { ArrayList() }.takeIf { first !in it }?.add(first)
                 }
             }
         }

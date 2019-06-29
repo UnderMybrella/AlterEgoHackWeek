@@ -149,6 +149,18 @@ fun Guild.findRoleByIdentifier(identifier: String): Mono<Role> {
         .next()
 }
 
+fun List<Role>.findRoleByIdentifier(identifier: String): Role? {
+    val identifierNumeric = identifier.replace(NON_NUMERIC_REGEX, "")
+    return firstOrNull { role ->
+        role.id.asString() == identifier || role.id.asString() == identifierNumeric || role.name.equals(
+            identifier,
+            true
+        )
+    } }
+
+fun <T> List<T>.zipTogether(): List<Pair<T, T>> =
+    flatMap { t -> this.mapNotNull { r -> if (t != r) Pair(t, r) else null } }
+
 fun ReactionEmoji.asFormat(): String =
     when (this) {
         is ReactionEmoji.Custom -> '<' + (if (isAnimated) "a" else "") + ':' + name + ':' + id.asString() + '>'
